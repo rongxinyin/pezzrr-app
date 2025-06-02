@@ -12,11 +12,11 @@ from datetime import datetime, timedelta
 from threading import Timer
 import gevent
 
-from volttron.platform.agent import utils
-from volttron.platform.messaging import topics, headers as headers_mod
-from volttron.platform.agent.utils import (setup_logging, format_timestamp, 
+from volttron import utils
+from volttron.client.messaging import topics, headers as headers_mod
+from volttron.utils import (setup_logging, format_timestamp, 
                                           get_aware_utc_now, parse_timestamp_string)
-from volttron.platform.vip.agent import Agent, Core, RPC
+from volttron.client import Agent, Core, RPC
 
 setup_logging()
 _log = logging.getLogger(__name__)
