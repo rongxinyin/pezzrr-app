@@ -1,2 +1,16 @@
 volttron_config.yaml
 *.pyc
+.volttron
+# Ignore the virtual environment directory
+venv/
+# Ignore the configuration files in each agent directory
+agents/*/config.json
+# Ignore each agent's build directory
+agents/*/build/
+agents/*/dist/
+agents/*/__pycache__/
+agents/*/*.egg-info
+agents/*/pyproject.toml
+# Ignore each agent's log files
+agents/*/myapp.log
+
