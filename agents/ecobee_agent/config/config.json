@@ -1,0 +1,15 @@
+{
+  "api_key": "rJ5sN8CzMnuUlZ5JW3b4qu5b3n8EVHu4",
+  "app_id": "personal-comfort-system",
+  "scope": "smartWrite",
+  "poll_interval": 300,
+  "thermostat_name": "Home",
+  "campus": "CAMPUS",
+  "building": "BUILDING",
+  "device_id": "421833899027",
+  "publish_temperature": true,
+  "publish_setpoints": true,
+  "publish_hvac_mode": true,
+  "api_base_url": "https://api.ecobee.com/1",
+  "oauth_base_url": "https://api.ecobee.com/authorize"
+}

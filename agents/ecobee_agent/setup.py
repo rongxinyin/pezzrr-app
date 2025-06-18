@@ -18,7 +18,8 @@ setup(
     packages=find_packages('.'),
     entry_points={
         'setuptools.installation': [
-            'eggsecutable = ' + MAIN_MODULE + '.agent:main',
+            # 'eggsecutable = ' + MAIN_MODULE + '_agent:main',
+            'eggsecutable = ' + MAIN_MODULE + '_agent:main',
         ]
     },
     install_requires=requirements,

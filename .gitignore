@@ -13,4 +13,12 @@ agents/*/*.egg-info
 agents/*/pyproject.toml
 # Ignore each agent's log files
 agents/*/myapp.log
+volttron.log
+myapp.log
+# Ignore the Python bytecode files
+*.py[cod]
+# Ignore the Python cache directories
+__pycache__/
+# Ignore the Python virtual environment
 
+config/*

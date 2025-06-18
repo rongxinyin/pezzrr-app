@@ -3,6 +3,7 @@ Ecobee Smart Thermostat Agent for PEZZRR Controller
 Handles OAuth2 authentication and thermostat control via Ecobee API
 """
 
+import os
 import sys
 import logging
 import json
@@ -10,12 +11,13 @@ import requests
 import time
 from datetime import datetime, timedelta
 from threading import Timer
+from typing import Dict
 import gevent
 
 from volttron import utils
 from volttron.client.messaging import topics, headers as headers_mod
-from volttron.utils import (setup_logging, format_timestamp, 
-                                          get_aware_utc_now, parse_timestamp_string)
+from volttron.utils.logs import setup_logging
+from volttron.utils.time import format_timestamp, get_aware_utc_now
 from volttron.client import Agent, Core, RPC
 
 setup_logging()
@@ -75,10 +77,69 @@ class EcobeeAgent(Agent):
         self.publish_base_topic = None
         self.device_topic = None
         
+        # # Load configuration from file or use defaults
+        # self.config = self.load_config_file()
+        # _log.info("Loaded configuration: {self.config}")
+        # if not self.validate_config(self.config):
+        #     _log.error("Invalid configuration. Please check your config.json file.")
+        #     raise ValueError("Invalid configuration. Please check your config.json file.")
+        
         # Configuration setup
         self.vip.config.set_default("config", self.default_config)
         self.vip.config.subscribe(self.configure_main, actions=["NEW", "UPDATE"])
 
+    # def load_config_file(self) -> Dict:
+    #     """Load configuration from the specified config file"""
+    #     config = self.default_config.copy()
+    #     config_loaded = False
+
+    #     config_path = os.path.join('')
+
+    #     try:
+    #         if os.path.exists(config_path):
+    #             _log.info(f"Loading configuration from: {config_path}")
+                
+    #             with open(config_path, 'r') as f:
+    #                 file_config = json.load(f)
+                
+    #             # Validate required fields
+    #             if self.validate_config(file_config):
+    #                 config.update(file_config)
+    #                 config_loaded = True
+    #                 _log.info(f"Successfully loaded configuration from {config_path}")
+    #             else:
+    #                 _log.warning(f"Invalid configuration in {config_path}, trying next location")
+                    
+    #     except Exception as e:
+    #         _log.warning(f"Failed to load config from {config_path}: {e}")
+        
+    #     if not config_loaded:
+    #         _log.warning("No valid configuration file found, using defaults with simulation mode")
+        
+    #     return config
+
+    # def validate_config(self, config: Dict) -> bool:
+    #     """Validate the configuration file"""
+    #     try:
+    #         # For real API mode, require credentials
+    #         required_fields = ["api_key"]
+    #         for field in required_fields:
+    #             if not config.get(field):
+    #                 _log.error(f"Missing required configuration field: {field}")
+    #                 return False
+            
+    #         # Validate numeric values
+    #         if "poll_interval" in config:
+    #             if not isinstance(config["poll_interval"], (int, float)) or config["poll_interval"] <= 0:
+    #                 _log.error("poll_interval must be a positive number")
+    #                 return False
+            
+    #         return True
+            
+    #     except Exception as e:
+    #         _log.error(f"Error validating configuration: {e}")
+    #         return False
+               
     def configure_main(self, config_name, action, contents):
         """Configure the agent from config store"""
         config = self.default_config.copy()
