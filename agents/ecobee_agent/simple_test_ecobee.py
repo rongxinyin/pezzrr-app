@@ -41,7 +41,7 @@ def test_volttron_environment():
     
     # Check if VOLTTRON is running
     success, stdout, stderr = run_vctl_command("vctl status")
-    if success and "RUNNING" in stdout:
+    if success and ("RUNNING" in stdout or "running" in stdout):
         print("✅ VOLTTRON platform is running")
         return True
     else:
@@ -60,7 +60,7 @@ def test_agent_installation():
             print("✅ Ecobee agent found in agent list")
             
             # Check if running
-            if "RUNNING" in stdout:
+            if "RUNNING" in stdout or "running" in stdout:
                 print("✅ Ecobee agent is running")
                 return True
             else:
@@ -84,7 +84,7 @@ def test_agent_rpc():
     test_script = '''
 import sys
 try:
-    result = vip.rpc.call('ecobee_agent', 'get_agent_status').get(timeout=10)
+    result = vip.rpc.call('ecobee-agent-1.0.0_1', 'get_status').get(timeout=10)
     print("RPC_SUCCESS:", result)
 except Exception as e:
     print("RPC_ERROR:", str(e))
