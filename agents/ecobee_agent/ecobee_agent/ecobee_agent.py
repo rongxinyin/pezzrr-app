@@ -7,20 +7,25 @@ import os
 import sys
 import logging
 import json
-import requests
 import time
 from datetime import datetime, timedelta
 from threading import Timer
 from typing import Dict
+
+# Import gevent first to ensure proper monkey-patching before requests/urllib3
 import gevent
+from gevent import monkey
+monkey.patch_all()
+
+# Now import requests after monkey-patching
+import requests
 
 from volttron import utils
 from volttron.client.messaging import topics, headers as headers_mod
-from volttron.utils.logs import setup_logging
-from volttron.utils.time import format_timestamp, get_aware_utc_now
+from volttron.utils import format_timestamp, get_aware_utc_now
 from volttron.client import Agent, Core, RPC
 
-setup_logging()
+logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
 __version__ = "1.0.0"
@@ -142,13 +147,22 @@ class EcobeeAgent(Agent):
                
     def configure_main(self, config_name, action, contents):
         """Configure the agent from config store"""
+        _log.info(f"Configuring Ecobee Agent: {action}, config_name={config_name}, contents keys={list(contents.keys()) if contents else 'None'}")
+
+        # Only process the main config
+        if config_name != "config":
+            _log.info(f"Ignoring non-main config: {config_name}")
+            return
+
         config = self.default_config.copy()
         config.update(contents)
-        
-        _log.info(f"Configuring Ecobee Agent: {action}")
-        
-        # Store configuration
-        self.api_key = config.get("api_key")
+
+        # Store configuration - only update api_key if provided
+        new_api_key = config.get("api_key")
+        if new_api_key:
+            self.api_key = new_api_key
+        elif not hasattr(self, 'api_key') or not self.api_key:
+            self.api_key = ""
         self.app_id = config.get("app_id") 
         self.scope = config.get("scope", "smartWrite")
         self.poll_interval = config.get("poll_interval", 300)
@@ -226,52 +240,67 @@ class EcobeeAgent(Agent):
         except Exception as e:
             _log.error(f"Error starting OAuth flow: {e}")
 
-    def _get_access_token(self):
+    def _get_access_token(self, retry_count=0):
         """Exchange authorization code for access token"""
+        max_retries = 60  # Retry for up to 10 minutes (60 * 10 seconds)
+
         try:
-            token_url = f"{self.api_base_url}/token"
-            
+            # Token endpoint is at root, not under /1
+            token_url = "https://api.ecobee.com/token"
+
             token_data = {
                 'grant_type': 'ecobeePin',
                 'code': self.authorization_code,
                 'client_id': self.api_key
             }
-            
-            headers = {
-                'Content-Type': 'application/json'
-            }
-            
-            response = requests.post(token_url, json=token_data, headers=headers)
-            
-            if response.status_code == 200:
-                token_info = response.json()
-                
-                self.access_token = token_info['access_token']
-                self.refresh_token = token_info['refresh_token']
-                self.token_expires_at = datetime.now() + timedelta(seconds=token_info['expires_in'])
-                
+
+            _log.info(f"Token request: url={token_url}, client_id={self.api_key}, code={self.authorization_code}")
+
+            # Ecobee API expects query parameters in URL for token exchange
+            response = requests.post(
+                f"{token_url}?grant_type=ecobeePin&code={self.authorization_code}&client_id={self.api_key}"
+            )
+            response_data = response.json()
+            _log.info(f"Token response (status {response.status_code}): {response_data}")
+
+            if response.status_code == 200 and 'access_token' in response_data:
+                self.access_token = response_data['access_token']
+                self.refresh_token = response_data['refresh_token']
+                self.token_expires_at = datetime.now() + timedelta(seconds=response_data['expires_in'])
+
                 _log.info("Successfully obtained access token!")
-                
+
                 # Save tokens and start polling
                 self._save_tokens()
                 self._start_polling()
                 self._schedule_token_refresh()
-                
+
             else:
-                error_data = response.json()
-                if error_data.get('error') == 'authorization_pending':
-                    _log.info("Authorization still pending. Checking again in 30 seconds...")
-                    Timer(30, self._get_access_token).start()
+                # Check for authorization_pending error (Ecobee uses status.code format)
+                error_code = response_data.get('status', {}).get('code', 0)
+                error_msg = response_data.get('status', {}).get('message', '')
+
+                # Error code 2 = "authorization_pending" - user hasn't authorized yet
+                # Error code 1 = "authentication token required" - may need retry
+                if error_code == 2 or (retry_count < max_retries and 'authorization' in error_msg.lower()):
+                    _log.info(f"Authorization pending. Checking again in 10 seconds... (attempt {retry_count + 1}/{max_retries})")
+                    Timer(10, lambda: self._get_access_token(retry_count + 1)).start()
+                elif retry_count < max_retries:
+                    _log.info(f"Waiting for authorization. Retrying in 10 seconds... (attempt {retry_count + 1}/{max_retries})")
+                    Timer(10, lambda: self._get_access_token(retry_count + 1)).start()
                 else:
-                    _log.error(f"Failed to get access token: {error_data}")
-                    
+                    _log.error(f"Failed to get access token after {max_retries} attempts: {response_data}")
+
         except Exception as e:
             _log.error(f"Error getting access token: {e}")
+            if retry_count < max_retries:
+                Timer(10, lambda: self._get_access_token(retry_count + 1)).start()
 
     def _refresh_access_token(self):
         """Refresh the access token using refresh token"""
         try:
-            token_url = f"{self.api_base_url}/token"
+            # Token endpoint is at root, not under /1
+            token_url = "https://api.ecobee.com/token"
             
             refresh_data = {
                 'grant_type': 'refresh_token',
