@@ -3,6 +3,11 @@ EcoFlow Battery Agent for VOLTTRON
 Interfaces with EcoFlow smart home panels and batteries via API
 """
 
+# Import gevent first to ensure proper monkey-patching before requests/urllib3
+import gevent
+from gevent import monkey
+monkey.patch_all()
+
 import logging
 import requests
 import json
@@ -12,18 +17,14 @@ import hmac
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+from threading import Timer
 
 from volttron import utils
 from volttron.client.messaging import topics, headers as headers_mod
-from volttron.utils import (setup_logging, format_timestamp, 
-                                          get_aware_utc_now, parse_timestamp_string)
+from volttron.utils import format_timestamp, get_aware_utc_now, parse_timestamp_string
 from volttron.client import Agent, Core, RPC
-from volttron.utils import (
-    setup_logging, format_timestamp, get_aware_utc_now
-)
-from volttron.utils.jsonrpc import RemoteError
 
-setup_logging()
+logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
 
@@ -62,6 +63,8 @@ class EcoFlowAgent(Agent):
         self.devices = {}
         self.device_states = {}
         self.last_update = {}
+        self.poll_timer = None
+        self._operations_started = False
         
         # Configuration setup
         self.vip.config.set_default("config", self.default_config)
@@ -75,7 +78,7 @@ class EcoFlowAgent(Agent):
         """Handle configuration updates"""
         config = self.default_config.copy()
         config.update(contents)
-        
+
         self.api_base_url = config.get("api_base_url")
         self.access_key = config.get("access_key")
         self.secret_key = config.get("secret_key")
@@ -83,74 +86,101 @@ class EcoFlowAgent(Agent):
         self.auto_discover = config.get("auto_discover", True)
         self.battery_config = config.get("battery_management", {})
         self.grid_config = config.get("grid_management", {})
-        
+
         # Configure specific devices if provided
         device_list = config.get("devices", [])
         for device_sn in device_list:
             self.devices[device_sn] = {"serial_number": device_sn, "type": "unknown"}
-        
+
         _log.info(f"EcoFlow Agent configured with {len(self.devices)} devices")
+
+        # Start agent operations after config is loaded (only once)
+        if self.access_key and self.secret_key and self.access_key != "your_access_key":
+            if not self._operations_started:
+                _log.info("API credentials found, initializing agent operations...")
+                self._start_agent_operations()
+        else:
+            _log.warning("API credentials not configured. Please update config with valid credentials.")
+
+    def _start_agent_operations(self):
+        """Start agent operations after config is loaded"""
+        self._operations_started = True
+
+        # Discover devices if enabled
+        if self.auto_discover:
+            self.discover_devices()
+
+        # Start periodic polling using Timer
+        self._start_polling()
+
+        _log.info("EcoFlow Agent operations started successfully")
+
+    def _start_polling(self):
+        """Start periodic polling of devices"""
+        self.poll_devices()
+
+        # Schedule next poll
+        if self.poll_timer:
+            self.poll_timer.cancel()
+        self.poll_timer = Timer(self.poll_interval, self._start_polling)
+        self.poll_timer.start()
 
     @Core.receiver("onstart")
     def startup(self, sender, **kwargs):
-        """Agent startup"""
+        """Agent startup - sets up subscriptions, config callback handles API initialization"""
         _log.info("EcoFlow Agent starting...")
-        
-        # Validate API credentials
-        if not self.access_key or not self.secret_key:
-            _log.error("API credentials not provided. Cannot start agent.")
-            return
-        
+
         # Subscribe to command topic
         self.vip.pubsub.subscribe(
             peer="pubsub",
             prefix="devices/ecoflow",
             callback=self.handle_commands
         )
-        
-        # Discover devices if enabled
-        if self.auto_discover:
-            self.discover_devices()
-        
-        # Start periodic polling
-        self.core.periodic(self.poll_interval)(self.poll_devices)
-        
-        _log.info("EcoFlow Agent started successfully")
+
+        _log.info("EcoFlow Agent started, waiting for configuration...")
+
+    def _get_qstring(self, params):
+        """Convert params dict to sorted query string"""
+        if not params:
+            return ""
+        sorted_params = sorted(params.items())
+        return "&".join([f"{k}={v}" for k, v in sorted_params])
+
+    def _hmac_sha256(self, data, key):
+        """Generate HMAC-SHA256 signature"""
+        hashed = hmac.new(key.encode('utf-8'), data.encode('utf-8'), hashlib.sha256).digest()
+        return ''.join(format(byte, '02x') for byte in hashed)
 
     def generate_signature(self, method, url, params=None, data=None):
-        """Generate API signature for authentication"""
+        """Generate API signature for EcoFlow authentication"""
         try:
+            import random
             timestamp = str(int(time.time() * 1000))
-            nonce = str(int(time.time()))
-            
-            # Create canonical string
-            canonical_string = f"{method}\n{url}\n"
-            
+            nonce = str(random.randint(100000, 999999))
+
+            # Build headers dict for signing
+            headers_dict = {
+                'accessKey': self.access_key,
+                'nonce': nonce,
+                'timestamp': timestamp
+            }
+
+            # Build sign string: params (if any) + headers
+            sign_parts = []
             if params:
-                sorted_params = sorted(params.items())
-                param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
-                canonical_string += param_string + "\n"
-            else:
-                canonical_string += "\n"
-            
-            if data:
-                canonical_string += json.dumps(data, separators=(',', ':'))
-            
-            canonical_string += f"\n{self.access_key}\n{timestamp}\n{nonce}"
-            
+                sign_parts.append(self._get_qstring(params))
+            sign_parts.append(self._get_qstring(headers_dict))
+            sign_str = '&'.join(sign_parts)
+
             # Generate signature
-            signature = hmac.new(
-                self.secret_key.encode('utf-8'),
-                canonical_string.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-            
+            signature = self._hmac_sha256(sign_str, self.secret_key)
+
             return {
                 "timestamp": timestamp,
                 "nonce": nonce,
                 "signature": signature
             }
-            
+
         except Exception as e:
             _log.error(f"Error generating signature: {e}")
             return None
@@ -166,10 +196,10 @@ class EcoFlowAgent(Agent):
             
             headers = {
                 "Content-Type": "application/json",
-                "X-Access-Key": self.access_key,
-                "X-Timestamp": auth_data["timestamp"],
-                "X-Nonce": auth_data["nonce"],
-                "X-Signature": auth_data["signature"]
+                "accessKey": self.access_key,
+                "timestamp": auth_data["timestamp"],
+                "nonce": auth_data["nonce"],
+                "sign": auth_data["signature"]
             }
             
             if method.upper() == "GET":
@@ -196,18 +226,18 @@ class EcoFlowAgent(Agent):
         """Discover EcoFlow devices associated with account"""
         try:
             _log.info("Discovering EcoFlow devices...")
-            
-            # Get device list from API
-            response = self.make_api_request("GET", "/devices")
-            
-            if response and response.get("code") == 0:
+
+            # Get device list from API (EcoFlow IoT Open API)
+            response = self.make_api_request("GET", "/iot-open/sign/device/list")
+
+            if response and (response.get("code") == "0" or response.get("code") == 0):
                 device_list = response.get("data", [])
-                
+
                 for device in device_list:
                     device_sn = device.get("sn")
                     device_type = device.get("deviceType")
                     device_name = device.get("deviceName", f"EcoFlow_{device_type}")
-                    
+
                     self.devices[device_sn] = {
                         "serial_number": device_sn,
                         "type": device_type,
@@ -216,14 +246,15 @@ class EcoFlowAgent(Agent):
                         "model": device.get("productType", ""),
                         "firmware_version": device.get("version", "")
                     }
-                    
+
                     _log.info(f"Discovered EcoFlow device: {device_name} ({device_sn})")
-                
+
                 _log.info(f"Discovery complete. Found {len(self.devices)} EcoFlow devices")
-                
+
             else:
-                _log.error("Failed to discover devices")
-                
+                error_msg = response.get("message", "Unknown error") if response else "No response"
+                _log.error(f"Failed to discover devices: {error_msg}")
+
         except Exception as e:
             _log.error(f"Error discovering devices: {e}")
 
