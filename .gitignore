@@ -22,3 +22,4 @@ __pycache__/
 # Ignore the Python virtual environment
 
 config/*
+data_collectors/collector.log
