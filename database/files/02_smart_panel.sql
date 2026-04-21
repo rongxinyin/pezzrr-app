@@ -55,12 +55,12 @@ CREATE INDEX IF NOT EXISTS idx_spr_home_ts   ON smart_panel_readings(home_id,   
 -- -------------------------------------------------------------
 -- TABLE: panel_circuits
 -- Static configuration for each load branch / circuit of a panel.
--- EcoFlow SHP2 supports up to 12 load branches (channels 0–11).
+-- EcoFlow SHP2 supports up to 12 load branches (channels 1–12, matching API ch1–ch12).
 -- -------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS panel_circuits (
     circuit_id          SERIAL          PRIMARY KEY,
     device_id           INTEGER         NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
-    channel_num         SMALLINT        NOT NULL CHECK (channel_num BETWEEN 0 AND 11),
+    channel_num         SMALLINT        NOT NULL CHECK (channel_num BETWEEN 1 AND 12),
     circuit_name        VARCHAR(100),               -- "HVAC", "Kitchen", "EV Charger", etc.
     rated_amps          NUMERIC(6,2),               -- Breaker amperage rating
     is_critical         BOOLEAN         NOT NULL DEFAULT FALSE,  -- Cannot be curtailed during DR

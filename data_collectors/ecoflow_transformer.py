@@ -66,17 +66,16 @@ def transform_circuit_readings(data, device_id, home_id, circuit_map):
     ts = _now_utc()
     rows = []
 
-    for ch_num in range(12):  # channels 0-11
+    for ch_num in range(1, 13):  # channels 1-12, matching EcoFlow API (ch1-ch12)
         circuit_id = circuit_map.get(ch_num)
         if circuit_id is None:
             continue
 
-        power = hall1_watt[ch_num] if ch_num < len(hall1_watt) else 0.0
+        arr_idx = ch_num - 1  # hall1Watt list is 0-indexed
+        power = hall1_watt[arr_idx] if arr_idx < len(hall1_watt) else 0.0
 
-        # Channel index in API is 1-based
-        api_idx = ch_num + 1
         load_sta = data.get(
-            f"pd303_mc.loadIncreInfo.hall1IncreInfo.ch{api_idx}Sta.loadSta",
+            f"pd303_mc.loadIncreInfo.hall1IncreInfo.ch{ch_num}Sta.loadSta",
             "",
         )
         is_enabled = load_sta == "LOAD_CH_POWER_ON"

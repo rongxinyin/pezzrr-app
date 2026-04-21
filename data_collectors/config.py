@@ -45,6 +45,32 @@ def get_ecobee_config():
     return _load_json("ecobee_config.json")
 
 
+def iter_ecobee_accounts():
+    """Yield an account-level config dict for each Ecobee account.
+
+    Top-level keys (poll_interval, api_base_url, etc.) are merged in as
+    defaults; per-account keys take precedence.
+    """
+    cfg = get_ecobee_config()
+    shared = {k: v for k, v in cfg.items() if k != "accounts"}
+    for account in cfg.get("accounts", []):
+        yield {**shared, **account}
+
+
+def iter_ecobee_devices():
+    """Yield a flat config dict for each device across all Ecobee accounts.
+
+    Each dict contains: api_key, app_id, account_name, device_id, home_name,
+    plus shared fields — ready to pass directly to helpers.
+    """
+    cfg = get_ecobee_config()
+    shared = {k: v for k, v in cfg.items() if k != "accounts"}
+    for account in cfg.get("accounts", []):
+        acc_cfg = {**shared, **account}
+        for device in account.get("devices", []):
+            yield {**acc_cfg, "account_name": account["name"], **device}
+
+
 def get_db_config():
     return _load_json("data_analytics_config.json")["database"]
 

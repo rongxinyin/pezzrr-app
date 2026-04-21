@@ -195,8 +195,9 @@ class DatabaseManager:
                 (device_id, home_id, ts,
                  indoor_temp_c, outdoor_temp_c, indoor_humidity_pct,
                  heat_setpoint_c, cool_setpoint_c,
-                 hvac_mode, hvac_state, fan_mode, occupancy_status)
-            VALUES (%s,%s,%s, %s,%s,%s, %s,%s, %s,%s,%s,%s)
+                 hvac_mode, hvac_state, fan_mode, occupancy_status,
+                 hold_type, hold_until)
+            VALUES (%s,%s,%s, %s,%s,%s, %s,%s, %s,%s,%s,%s, %s,%s)
             """,
             (
                 row["device_id"], row["home_id"], row["ts"],
@@ -205,5 +206,6 @@ class DatabaseManager:
                 row.get("heat_setpoint_c"), row.get("cool_setpoint_c"),
                 row.get("hvac_mode"), row.get("hvac_state"),
                 row.get("fan_mode"), row.get("occupancy_status"),
+                row.get("hold_type"), row.get("hold_until"),
             ),
         )

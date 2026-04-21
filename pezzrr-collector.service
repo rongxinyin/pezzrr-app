@@ -1,0 +1,17 @@
+[Unit]
+Description=Pezzrr Smart Home Data Collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryin
+WorkingDirectory=/home/ryin/github/pezzrr-app
+ExecStart=/home/ryin/github/pezzrr-app/venv/bin/python3 -m data_collectors collect
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ryin/github/pezzrr-app/data_collectors/collector.log
+StandardError=append:/home/ryin/github/pezzrr-app/data_collectors/collector.log
+
+[Install]
+WantedBy=multi-user.target

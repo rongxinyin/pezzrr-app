@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from .config import iter_ecoflow_devices
+from .config import iter_ecoflow_devices, iter_ecobee_accounts
 from .db import DatabaseManager
 from .ecoflow_client import EcoFlowClient
 from .ecoflow_transformer import (
@@ -29,7 +29,7 @@ POLL_INTERVAL = 60  # seconds
 class DataCollector:
     def __init__(self):
         self._stop_event = threading.Event()
-        self._last_ecobee_key = None
+        self._last_ecobee_keys = {}  # keyed by device_id
 
     def start(self):
         """Start both polling threads and block until SIGINT."""
@@ -146,53 +146,100 @@ class DataCollector:
         db.close()
 
     # ------------------------------------------------------------------
-    # Ecobee polling loop
+    # Ecobee polling loop  (covers all accounts + devices from config)
     # ------------------------------------------------------------------
     def _ecobee_loop(self):
         db = DatabaseManager()
-        client = EcobeeClient()
-
         db.connect()
-        home_id = db.get_home_id("test_home")
-        device_id = db.get_device_id(client.device_id)
-        if device_id is None:
-            device_id = db.get_device_id_by_api_id(client.device_id)
 
-        if not home_id or not device_id:
-            log.error("Seed data missing for ecobee. Run 'seed' first.")
+        # Build per-account context at startup
+        account_infos = []
+        for acc_cfg in iter_ecobee_accounts():
+            client = EcobeeClient(config=acc_cfg)
+            device_infos = []
+            for device in acc_cfg.get("devices", []):
+                home_name = device["home_name"]
+                ecobee_id = device["device_id"]
+
+                home_id = db.get_home_id(home_name)
+                device_id = db.get_device_id_by_api_id(ecobee_id)
+
+                if not home_id or not device_id:
+                    log.warning(
+                        "Seed data missing for ecobee home='%s' device_id='%s' — skipping. "
+                        "Run 'seed' first.",
+                        home_name, ecobee_id,
+                    )
+                    continue
+
+                device_infos.append({
+                    "home_name": home_name,
+                    "ecobee_id": ecobee_id,
+                    "home_id": home_id,
+                    "device_id": device_id,
+                })
+
+            if device_infos:
+                account_infos.append({
+                    "client": client,
+                    "account_name": acc_cfg["name"],
+                    "devices": device_infos,
+                })
+
+        if not account_infos:
+            log.error("No Ecobee devices available. Run 'seed' first.")
+            db.close()
             return
 
-        log.info("Ecobee loop ready: home_id=%s device_id=%s", home_id, device_id)
+        total_devices = sum(len(a["devices"]) for a in account_infos)
+        log.info("Ecobee loop ready: %d account(s), %d device(s)",
+                 len(account_infos), total_devices)
 
         while not self._stop_event.is_set():
-            try:
-                thermostat = client.get_thermostat_data()
-                if thermostat is None:
-                    log.warning("Ecobee poll returned no data")
-                    self._stop_event.wait(POLL_INTERVAL)
-                    continue
+            for acc in account_infos:
+                try:
+                    thermostats = acc["client"].get_all_thermostats()
+                    if not thermostats:
+                        log.warning("Ecobee account '%s': no data returned",
+                                    acc["account_name"])
+                        continue
 
-                # Dedup: only insert if readings changed
-                key = dedup_key(thermostat)
-                if key == self._last_ecobee_key:
-                    log.debug("Ecobee: no change, skipping insert")
-                    self._stop_event.wait(POLL_INTERVAL)
-                    continue
+                    for dev in acc["devices"]:
+                        thermostat = thermostats.get(dev["ecobee_id"])
+                        if thermostat is None:
+                            log.warning(
+                                "Ecobee account '%s': thermostat '%s' not in response",
+                                acc["account_name"], dev["ecobee_id"],
+                            )
+                            continue
 
-                row = transform_thermostat_reading(thermostat, device_id, home_id)
-                db.insert_thermostat_reading(row)
-                self._last_ecobee_key = key
+                        # Dedup: only insert if readings changed
+                        key = dedup_key(thermostat)
+                        if key == self._last_ecobee_keys.get(dev["ecobee_id"]):
+                            log.debug("Ecobee [%s/%s]: no change, skipping insert",
+                                      acc["account_name"], dev["home_name"])
+                            continue
 
-                log.info(
-                    "Ecobee: indoor=%.1f°C  humidity=%s%%  mode=%s  state=%s",
-                    row.get("indoor_temp_c") or 0,
-                    row.get("indoor_humidity_pct") or "?",
-                    row.get("hvac_mode") or "?",
-                    row.get("hvac_state") or "?",
-                )
+                        row = transform_thermostat_reading(
+                            thermostat, dev["device_id"], dev["home_id"]
+                        )
+                        db.insert_thermostat_reading(row)
+                        self._last_ecobee_keys[dev["ecobee_id"]] = key
 
-            except Exception:
-                log.error("Ecobee poll error:\n%s", traceback.format_exc())
+                        log.info(
+                            "Ecobee [%s/%s]: indoor=%.1f°C  humidity=%s%%"
+                            "  mode=%s  state=%s  hold=%s",
+                            acc["account_name"], dev["home_name"],
+                            row.get("indoor_temp_c") or 0,
+                            row.get("indoor_humidity_pct") or "?",
+                            row.get("hvac_mode") or "?",
+                            row.get("hvac_state") or "?",
+                            row.get("hold_type") or "none",
+                        )
+
+                except Exception:
+                    log.error("Ecobee poll error for account '%s':\n%s",
+                              acc["account_name"], traceback.format_exc())
 
             self._stop_event.wait(POLL_INTERVAL)
 

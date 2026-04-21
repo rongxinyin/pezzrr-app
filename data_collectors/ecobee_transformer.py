@@ -12,6 +12,22 @@ def _f_to_c(val_tenths):
     return round((val_tenths / 10.0 - 32) * 5 / 9, 2)
 
 
+def _parse_hold_until(event):
+    """Parse event endDate + endTime into a UTC-aware datetime, or None if indefinite."""
+    if event.get("holdType") == "indefinite":
+        return None
+    end_date = event.get("endDate", "")
+    end_time = event.get("endTime", "")
+    if end_date and end_time:
+        try:
+            return datetime.strptime(
+                f"{end_date} {end_time}", "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
 def _derive_hvac_state(runtime):
     """Derive HVAC state from equipmentStatus string."""
     status = runtime.get("equipmentStatus", "")
@@ -41,6 +57,15 @@ def transform_thermostat_reading(thermostat, device_id, home_id):
     fan_min_on = settings.get("fanMinOnTime", 0)
     fan_mode = "on" if fan_min_on > 0 else "auto"
 
+    # Active event (hold, vacation, autoAway, etc.)
+    events = thermostat.get("events", [])
+    active_event = next((e for e in events if e.get("running")), None)
+    hold_type = None
+    hold_until = None
+    if active_event:
+        hold_type = active_event.get("holdType") or active_event.get("type")
+        hold_until = _parse_hold_until(active_event)
+
     return {
         "device_id": device_id,
         "home_id": home_id,
@@ -54,16 +79,22 @@ def transform_thermostat_reading(thermostat, device_id, home_id):
         "hvac_state": _derive_hvac_state(runtime),
         "fan_mode": fan_mode,
         "occupancy_status": program.get("currentClimateRef"),
+        "hold_type": hold_type,
+        "hold_until": hold_until,
     }
 
 
 def dedup_key(thermostat):
     """Return a hashable tuple for dedup comparison."""
     runtime = thermostat.get("runtime", {})
+    events = thermostat.get("events", [])
+    active_event = next((e for e in events if e.get("running")), None)
     return (
         runtime.get("actualTemperature"),
         runtime.get("actualHumidity"),
         runtime.get("desiredHeat"),
         runtime.get("desiredCool"),
         runtime.get("lastStatusModified"),
+        active_event.get("holdType") if active_event else None,
+        active_event.get("endDate") if active_event else None,
     )

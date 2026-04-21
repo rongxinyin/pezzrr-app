@@ -6,13 +6,11 @@ from 'pezerr panel summary.xlsx'.
 
 import logging
 
-from .config import iter_ecoflow_devices
+from .config import iter_ecoflow_devices, iter_ecobee_devices
 from .db import DatabaseManager
 from .ecoflow_client import EcoFlowClient
 
 log = logging.getLogger(__name__)
-
-ECOBEE_ID = "421833899027"
 
 # Home metadata keyed by home_name.
 # Lab home kept for backward compat; deploy homes from 'pezerr panel summary.xlsx'.
@@ -143,31 +141,54 @@ def seed(db=None):
             log.warning("EcoFlow API call failed for %s (%s), using default names", device_sn, e)
             data = None
 
-        for ch in range(12):
-            api_idx = ch + 1
+        for ch in range(1, 13):  # 1-indexed to match EcoFlow API (ch1-ch12)
             if data:
                 name = data.get(
-                    f"pd303_mc.loadIncreInfo.hall1IncreInfo.ch{api_idx}Info.chName",
-                    f"Circuit {api_idx}",
+                    f"pd303_mc.loadIncreInfo.hall1IncreInfo.ch{ch}Info.chName",
+                    f"Circuit {ch}",
                 )
             else:
-                name = f"Circuit {api_idx}"
+                name = f"Circuit {ch}"
             cid = db.upsert_panel_circuit(panel_device_id, ch, name)
             log.info("  ch=%d  %-20s  circuit_id=%s", ch, name, cid)
 
-    # ---- Ecobee thermostat (lab home only) ----
-    lab_home_id = seeded_homes.get("test_home")
-    if lab_home_id:
+    # ---- Ecobee thermostats (all accounts + devices from config) ----
+    for dev_cfg in iter_ecobee_devices():
+        home_name = dev_cfg["home_name"]
+        ecobee_id = dev_cfg["device_id"]
+        account = dev_cfg["account_name"]
+
+        # Ensure home exists (may already be seeded by EcoFlow loop above)
+        if home_name not in seeded_homes:
+            meta = HOME_METADATA.get(home_name, {
+                "address": "", "city": "", "state": "", "zip_code": "",
+                "utility_id": "", "timezone": "America/Los_Angeles",
+            })
+            home_id = db.upsert_home(
+                home_name=home_name,
+                address=meta["address"],
+                city=meta["city"],
+                state=meta["state"],
+                zip_code=meta["zip_code"],
+                utility_id=meta["utility_id"],
+                timezone=meta["timezone"],
+            )
+            seeded_homes[home_name] = home_id
+            log.info("[%s] home '%s' -> home_id=%s", account, home_name, home_id)
+        else:
+            home_id = seeded_homes[home_name]
+
         thermo_device_id = db.upsert_device(
-            home_id=lab_home_id,
+            home_id=home_id,
             device_type="thermostat",
             device_name="Ecobee Thermostat",
             manufacturer="Ecobee",
             model="SmartThermostat",
-            serial_number=ECOBEE_ID,
-            api_identifier=ECOBEE_ID,
+            serial_number=ecobee_id,
+            api_identifier=ecobee_id,
         )
-        log.info("thermostat '%s' -> device_id=%s", ECOBEE_ID, thermo_device_id)
+        log.info("[%s] thermostat '%s' @ '%s' -> device_id=%s",
+                 account, ecobee_id, home_name, thermo_device_id)
 
     log.info("Seed complete. %d homes, %d panel devices.", len(seeded_homes), len(seeded_panels))
     return seeded_homes, seeded_panels

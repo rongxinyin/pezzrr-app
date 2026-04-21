@@ -15,19 +15,26 @@ from .config import get_ecobee_config, CONFIG_DIR, PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 
-_TOKEN_FILE = os.path.join(CONFIG_DIR, "ecobee_tokens.json")
 _VOLTTRON_STORE = os.path.join(
     PROJECT_ROOT,
     ".volttron", "configuration_store", "ecobee-agent-1.0.0_1.store",
 )
+# Legacy single-account token file (used as fallback for the lab account)
+_LEGACY_TOKEN_FILE = os.path.join(CONFIG_DIR, "ecobee_tokens.json")
+
+
+def _token_file(account_name):
+    return os.path.join(CONFIG_DIR, f"ecobee_tokens_{account_name}.json")
 
 
 class EcobeeClient:
     def __init__(self, config=None):
         cfg = config or get_ecobee_config()
         self.api_key = cfg["api_key"]
+        self.account_name = cfg.get("name", cfg.get("account_name", "default"))
         self.api_base_url = cfg.get("api_base_url", "https://api.ecobee.com/1")
-        self.device_id = cfg.get("device_id")
+
+        self._token_file = _token_file(self.account_name)
 
         self.access_token = None
         self.refresh_token = None
@@ -39,18 +46,31 @@ class EcobeeClient:
     # Token persistence
     # ------------------------------------------------------------------
     def _load_tokens(self):
-        """Load tokens from ecobee_tokens.json, falling back to VOLTTRON store."""
-        if os.path.exists(_TOKEN_FILE):
-            with open(_TOKEN_FILE, "r") as f:
+        """Load tokens from per-account token file, with fallbacks."""
+        # 1. Per-account token file (preferred)
+        if os.path.exists(self._token_file):
+            with open(self._token_file, "r") as f:
                 data = json.load(f)
             self.access_token = data.get("access_token")
             self.refresh_token = data.get("refresh_token")
             exp = data.get("expires_at")
             self.expires_at = datetime.fromisoformat(exp) if exp else None
-            log.info("Loaded tokens from %s", _TOKEN_FILE)
+            log.info("Loaded tokens from %s", self._token_file)
             return
 
-        # Bootstrap from VOLTTRON config store
+        # 2. Legacy single-account token file (lab account only)
+        if os.path.exists(_LEGACY_TOKEN_FILE):
+            log.info("Migrating legacy token file to %s", self._token_file)
+            with open(_LEGACY_TOKEN_FILE, "r") as f:
+                data = json.load(f)
+            self.access_token = data.get("access_token")
+            self.refresh_token = data.get("refresh_token")
+            exp = data.get("expires_at")
+            self.expires_at = datetime.fromisoformat(exp) if exp else None
+            self._save_tokens()
+            return
+
+        # 3. Bootstrap from VOLTTRON config store
         if os.path.exists(_VOLTTRON_STORE):
             log.info("Bootstrapping tokens from VOLTTRON store ...")
             with open(_VOLTTRON_STORE, "r") as f:
@@ -63,16 +83,17 @@ class EcobeeClient:
             self._save_tokens()
             return
 
-        log.warning("No stored tokens found. Call start_pin_auth() first.")
+        log.warning("No stored tokens found for account '%s'. Call start_pin_auth() first.",
+                    self.account_name)
 
     def _save_tokens(self):
-        with open(_TOKEN_FILE, "w") as f:
+        with open(self._token_file, "w") as f:
             json.dump({
                 "access_token": self.access_token,
                 "refresh_token": self.refresh_token,
                 "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             }, f, indent=2)
-        log.debug("Tokens saved to %s", _TOKEN_FILE)
+        log.debug("Tokens saved to %s", self._token_file)
 
     # ------------------------------------------------------------------
     # OAuth2 token refresh
@@ -148,8 +169,13 @@ class EcobeeClient:
     # ------------------------------------------------------------------
     # API call
     # ------------------------------------------------------------------
-    def get_thermostat_data(self):
-        """Poll thermostat data. Returns the first thermostat dict or None."""
+    def get_all_thermostats(self):
+        """Poll all thermostats for this account.
+
+        Returns a dict keyed by thermostat identifier, e.g.:
+            {"421833899027": {...}, "422759094932": {...}}
+        Returns an empty dict if the API returns nothing.
+        """
         self._ensure_valid_token()
 
         params = {
@@ -181,6 +207,7 @@ class EcobeeClient:
 
         thermostats = data.get("thermostatList", [])
         if not thermostats:
-            log.warning("No thermostats returned from Ecobee API")
-            return None
-        return thermostats[0]
+            log.warning("No thermostats returned from Ecobee API for account '%s'",
+                        self.account_name)
+            return {}
+        return {t["identifier"]: t for t in thermostats}
