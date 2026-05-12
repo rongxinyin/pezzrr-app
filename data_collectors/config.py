@@ -71,6 +71,10 @@ def iter_ecobee_devices():
             yield {**acc_cfg, "account_name": account["name"], **device}
 
 
+def get_openadr_config():
+    return _load_json("openadr_config.json")
+
+
 def get_db_config():
     return _load_json("data_analytics_config.json")["database"]
 

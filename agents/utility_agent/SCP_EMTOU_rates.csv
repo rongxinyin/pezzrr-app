@@ -1,0 +1,5 @@
+Season,Start,Season_end,Period,Hours,Energy Rate ($/kWh),Delivery Rate ($/kWh),Total Rate ($/kWh)
+Summer,1-Jun,30-Sep,Peak,"4 PM - 9 PM, every day incl. weekends & holidays",0.17507,0.29,0.46507
+Summer,1-Jun,30-Sep,Off-Peak,All other hours,0.06838,0.29,0.35838
+Winter,1-Oct,31-May,Peak,"4 PM - 9 PM, every day incl. weekends & holidays",0.10061,0.29,0.39061
+Winter,1-Oct,31-May,Off-Peak,All other hours,0.07303,0.29,0.36303

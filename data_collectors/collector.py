@@ -1,6 +1,6 @@
 """
 Main data collection orchestrator.
-Two daemon threads poll EcoFlow and Ecobee at 1-minute intervals.
+Daemon threads poll EcoFlow, Ecobee, and OpenADR VTN at configured intervals.
 Each thread gets its own DB connection (psycopg2 is not thread-safe).
 """
 
@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from .config import iter_ecoflow_devices, iter_ecobee_accounts
+from .config import iter_ecoflow_devices, iter_ecobee_accounts, get_openadr_config
 from .db import DatabaseManager
 from .ecoflow_client import EcoFlowClient
 from .ecoflow_transformer import (
@@ -20,10 +20,12 @@ from .ecoflow_transformer import (
 )
 from .ecobee_client import EcobeeClient
 from .ecobee_transformer import transform_thermostat_reading, dedup_key
+from .openadr_client import OpenADRClient
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL = 60  # seconds
+POLL_INTERVAL = 60          # seconds
+STATUS_CHECK_INTERVAL = 10  # poll cycles (~10 minutes)
 
 
 class DataCollector:
@@ -42,10 +44,14 @@ class DataCollector:
         t_bee = threading.Thread(
             target=self._ecobee_loop, name="ecobee-poll", daemon=True
         )
+        t_adr = threading.Thread(
+            target=self._openadr_loop, name="openadr-poll", daemon=True
+        )
 
         log.info("Starting data collection (Ctrl-C to stop) ...")
         t_eco.start()
         t_bee.start()
+        t_adr.start()
 
         # Block main thread until stop signal
         while not self._stop_event.is_set():
@@ -102,8 +108,16 @@ class DataCollector:
 
         log.info("EcoFlow loop ready: %d device(s)", len(device_infos))
 
+        cycle = 0
         while not self._stop_event.is_set():
+            if cycle % STATUS_CHECK_INTERVAL == 0:
+                self._refresh_online_status(device_infos, db)
+
             for info in device_infos:
+                if not info.get("is_online", True):
+                    log.warning("EcoFlow [%s]: offline, skipping poll", info["label"])
+                    continue
+
                 try:
                     data = info["client"].get_device_quota()
                     if data is None:
@@ -141,9 +155,38 @@ class DataCollector:
                         info["label"], traceback.format_exc(),
                     )
 
+            cycle += 1
             self._stop_event.wait(POLL_INTERVAL)
 
         db.close()
+
+    def _refresh_online_status(self, device_infos, db):
+        """Call device/list once per unique account and update is_online in-memory + DB."""
+        seen_access_keys = {}  # access_key -> {sn: bool}
+        for info in device_infos:
+            ak = info["client"].access_key
+            if ak not in seen_access_keys:
+                try:
+                    seen_access_keys[ak] = info["client"].get_device_list()
+                except Exception:
+                    log.error("Failed to fetch device list for account with key ...%s:\n%s",
+                              ak[-6:], traceback.format_exc())
+                    seen_access_keys[ak] = {}
+
+            sn = info["client"].device_sn
+            status_map = seen_access_keys[ak]
+            if sn not in status_map:
+                continue
+
+            new_online = status_map[sn]
+            prev_online = info.get("is_online")
+            info["is_online"] = new_online
+
+            if new_online != prev_online:
+                state = "online" if new_online else "offline"
+                log.info("EcoFlow [%s]: status changed -> %s", info["label"], state)
+
+            db.update_device_online_status(sn, new_online)
 
     # ------------------------------------------------------------------
     # Ecobee polling loop  (covers all accounts + devices from config)
@@ -242,5 +285,61 @@ class DataCollector:
                               acc["account_name"], traceback.format_exc())
 
             self._stop_event.wait(POLL_INTERVAL)
+
+        db.close()
+
+    # ------------------------------------------------------------------
+    # OpenADR polling loop
+    # ------------------------------------------------------------------
+    def _openadr_loop(self):
+        db = DatabaseManager()
+        db.connect()
+
+        cfg = get_openadr_config()
+        poll_interval = int(cfg.get("poll_interval", POLL_INTERVAL))
+        client = OpenADRClient(cfg)
+
+        try:
+            client.connect()
+        except Exception:
+            log.error("OpenADR connect failed:\n%s", traceback.format_exc())
+            db.close()
+            return
+
+        log.info("OpenADR loop ready: VEN=%s  program=%s  interval=%ds",
+                 client.ven_name, cfg["program_name"], poll_interval)
+
+        while not self._stop_event.is_set():
+            try:
+                result = client.poll()
+                if result is None:
+                    log.warning("OpenADR: no active price interval at current time.")
+                else:
+                    row = {
+                        "ts":             result["polled_at"],
+                        "program_name":   result["program_name"],
+                        "program_id":     result["program_id"],
+                        "event_name":     result["event_name"],
+                        "event_id":       result["event_id"],
+                        "priority":       result["priority"],
+                        "period_type":    result["period_type"],
+                        "price_per_kwh":  result["price_per_kwh"],
+                        "interval_start": result["interval_start"],
+                        "interval_end":   result["interval_end"],
+                        "ven_id":         result["ven_id"],
+                        "ven_name":       result["ven_name"],
+                    }
+                    db.insert_openadr_event(row)
+                    log.info(
+                        "OpenADR [%s]: $%.5f/kWh  [%s]  event=%s",
+                        result["program_name"],
+                        result["price_per_kwh"],
+                        result["period_type"],
+                        result["event_name"],
+                    )
+            except Exception:
+                log.error("OpenADR poll error:\n%s", traceback.format_exc())
+
+            self._stop_event.wait(poll_interval)
 
         db.close()

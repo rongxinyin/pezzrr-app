@@ -130,6 +130,17 @@ class DatabaseManager:
             (device_id,))
         return {row[0]: row[1] for row in cur.fetchall()}
 
+    def update_device_online_status(self, serial_number, is_online):
+        cur = self._cursor()
+        cur.execute(
+            """
+            UPDATE devices
+            SET is_online = %s, online_updated_at = NOW()
+            WHERE serial_number = %s
+            """,
+            (is_online, serial_number),
+        )
+
     # ------------------------------------------------------------------
     # Insert methods (time-series readings)
     # ------------------------------------------------------------------
@@ -207,5 +218,33 @@ class DatabaseManager:
                 row.get("hvac_mode"), row.get("hvac_state"),
                 row.get("fan_mode"), row.get("occupancy_status"),
                 row.get("hold_type"), row.get("hold_until"),
+            ),
+        )
+
+    def insert_openadr_event(self, row):
+        cur = self._cursor()
+        cur.execute(
+            """
+            INSERT INTO openadr_events
+                (ts, program_name, program_id,
+                 event_name, event_id,
+                 priority, period_type, price_per_kwh,
+                 interval_start, interval_end,
+                 ven_id, ven_name)
+            VALUES (%s,%s,%s, %s,%s, %s,%s,%s, %s,%s, %s,%s)
+            """,
+            (
+                row["ts"],
+                row["program_name"],
+                row["program_id"],
+                row.get("event_name"),
+                row.get("event_id"),
+                row.get("priority"),
+                row.get("period_type"),
+                row["price_per_kwh"],
+                row["interval_start"],
+                row["interval_end"],
+                row.get("ven_id"),
+                row.get("ven_name"),
             ),
         )
