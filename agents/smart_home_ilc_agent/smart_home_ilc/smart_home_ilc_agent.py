@@ -162,6 +162,7 @@ class SmartHomeILCAgent(Agent):
         self.core.periodic(300)(self.optimize_loads)  # Every 5 minutes
         self.core.periodic(3600)(self.update_forecasts)  # Every hour
         self.core.periodic(900)(self.run_mpc_advisory)  # MPC advisory, every 15 min (matches dt)
+        self.core.periodic(300)(self.run_rbc_advisory)  # Rule-based DR/outage control, every 5 min
 
     def handle_ecobee_data(self, peer, sender, bus, topic, headers, message):
         """Handle Ecobee thermostat data"""
@@ -501,9 +502,16 @@ class SmartHomeILCAgent(Agent):
         except Exception as e:
             _log.error(f"Error updating forecasts: {e}")
 
+    @staticmethod
+    def _homes_for_strategy(cfg, strategy):
+        """Home names whose configured control_strategy matches `strategy`."""
+        default = cfg.get("defaults", {}).get("control_strategy", "mpc")
+        return [h for h, hc in cfg.get("homes", {}).items()
+                if hc.get("control_strategy", default).lower() == strategy]
+
     def run_mpc_advisory(self):
-        """Compute thermostat MPC setpoint advisories (shadow mode) for every
-        home configured in mpc_config.json and log them to control_actions.
+        """Compute thermostat MPC setpoint advisories (shadow mode) and log them
+        to control_actions for every home whose control_strategy is 'mpc'.
 
         Advisory only: nothing is sent to the thermostats. Each home is handled
         independently; homes without a fitted RC model or recent data are
@@ -525,7 +533,7 @@ class SmartHomeILCAgent(Agent):
             _log.error(f"MPC advisory: could not load mpc_config.json: {e}")
             return
 
-        for home_name in cfg.get("homes", {}):
+        for home_name in self._homes_for_strategy(cfg, "mpc"):
             try:
                 inp = mpc_data.build_inputs(home_name, mpc_cfg=cfg)
                 result = mpc_controller.solve_mpc(inp, mpc_cfg=cfg)
@@ -546,6 +554,57 @@ class SmartHomeILCAgent(Agent):
                 _log.warning(f"MPC[{home_name}] skipped: {e}")
             except Exception as e:
                 _log.error(f"MPC[{home_name}] failed: {e}")
+
+    def run_rbc_advisory(self):
+        """Rule-based DR/outage control (shadow mode) for every home whose
+        control_strategy is 'rbc'.
+
+        During an active OpenADR DR/outage event the RBC widens the thermostat
+        deadband (raise cooling setpoint, lower heating setpoint) so the HVAC
+        coasts to idle for the event hours; outside an event it recommends the
+        baseline setpoints. To keep the audit log clean it only writes when the
+        event state changes (onset or release), so the periodic can run often
+        without flooding control_actions."""
+        try:
+            try:
+                from . import mpc_data, rbc_controller
+            except ImportError:
+                import mpc_data
+                import rbc_controller
+        except Exception as e:
+            _log.warning(f"RBC advisory unavailable (missing dependency?): {e}")
+            return
+
+        try:
+            cfg = mpc_data._load_json("mpc_config.json")
+        except Exception as e:
+            _log.error(f"RBC advisory: could not load mpc_config.json: {e}")
+            return
+
+        homes = self._homes_for_strategy(cfg, "rbc")
+        if not homes:
+            return
+        conn = mpc_data._connect()
+        try:
+            for home_name in homes:
+                try:
+                    res = rbc_controller.compute_rbc(home_name, mpc_cfg=cfg, conn=conn)
+                    prev = rbc_controller.last_rbc_event_active(conn, res["device_id"])
+                    if prev == res["event_active"]:
+                        continue  # no transition -> nothing new to log
+                    action_id = rbc_controller.write_rbc_advisory(res, mpc_cfg=cfg, conn=conn)
+                    _log.info(
+                        f"RBC advisory[{home_name}] action_id={action_id} "
+                        f"event_active={res['event_active']} "
+                        f"cool {res['baseline_cool_setpoint_c']}->{res['recommended_cool_setpoint_c']}C "
+                        f"heat {res['baseline_heat_setpoint_c']}->{res['recommended_heat_setpoint_c']}C "
+                        f"idle_expected={res['hvac_expected_idle']}")
+                except SystemExit as e:
+                    _log.warning(f"RBC[{home_name}] skipped: {e}")
+                except Exception as e:
+                    _log.error(f"RBC[{home_name}] failed: {e}")
+        finally:
+            conn.close()
 
     # Additional helper methods for specific device types and strategies...
     def maintain_comfort_settings(self):
