@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import CONFIG_DIR, db
-from .routers import auth, homes, telemetry
+from .routers import auth, homes, live, telemetry
 
 DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
@@ -55,6 +55,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(homes.router)
 app.include_router(telemetry.router)
+app.include_router(live.router)
 
 
 @app.get("/api/v1/health", tags=["health"])
