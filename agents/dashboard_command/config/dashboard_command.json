@@ -1,0 +1,20 @@
+{
+  "gateway_id": "test-gw-home2",
+  "mqtt": {
+    "host": "localhost",
+    "port": 1883,
+    "user": null,
+    "pass": null
+  },
+  "rpc_timeout": 30,
+  "rpc_targets": {
+    "ilc": "platform.ilc",
+    "ecoflow": "ecoflow_agent",
+    "ecobee": "ecobee_agent",
+    "kasa": "kasa_plug"
+  },
+  "circuit_map": {
+    "37": { "device_sn": "HD31ZAS4HGAS0004", "channel": 9 },
+    "38": { "device_sn": "HD31ZAS4HGAS0004", "channel": 11 }
+  }
+}
