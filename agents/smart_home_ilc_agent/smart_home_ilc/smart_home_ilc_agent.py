@@ -162,6 +162,7 @@ class SmartHomeILCAgent(Agent):
         self.core.periodic(300)(self.optimize_loads)  # Every 5 minutes
         self.core.periodic(3600)(self.update_forecasts)  # Every hour
         self.core.periodic(900)(self.run_mpc_advisory)  # MPC advisory, every 15 min (matches dt)
+        self.core.periodic(300)(self.run_rbc_advisory)  # Rule-based DR/outage control, every 5 min
 
     def handle_ecobee_data(self, peer, sender, bus, topic, headers, message):
         """Handle Ecobee thermostat data"""
@@ -502,19 +503,24 @@ class SmartHomeILCAgent(Agent):
             _log.error(f"Error updating forecasts: {e}")
 
     def run_mpc_advisory(self):
-        """Compute thermostat MPC setpoint advisories (shadow mode) for every
-        home configured in mpc_config.json and log them to control_actions.
+        """Compute thermostat MPC setpoint advisories (shadow mode) and log them
+        to control_actions.
 
-        Advisory only: nothing is sent to the thermostats. Each home is handled
-        independently; homes without a fitted RC model or recent data are
-        skipped with a warning. The MPC modules talk to the database directly,
-        so this runs outside the VOLTTRON message bus."""
+        Iterates every configured home, resolves its operation scenario via the
+        supervisor, and runs the MPC only for homes whose resolved action is
+        'mpc' (an MPC-strategy home in normal or load-peak management). Homes in
+        capacity/resiliency shed are handled by run_rbc_advisory instead.
+
+        Advisory only: nothing is sent to the thermostats. Homes without a
+        fitted RC model or recent data are skipped with a warning. The MPC
+        modules talk to the database directly, outside the VOLTTRON bus."""
         try:
             try:
-                from . import mpc_data, mpc_controller
+                from . import mpc_data, mpc_controller, hvac_supervisor
             except ImportError:
                 import mpc_data
                 import mpc_controller
+                import hvac_supervisor
         except Exception as e:
             _log.warning(f"MPC advisory unavailable (missing dependency?): {e}")
             return
@@ -525,27 +531,101 @@ class SmartHomeILCAgent(Agent):
             _log.error(f"MPC advisory: could not load mpc_config.json: {e}")
             return
 
-        for home_name in cfg.get("homes", {}):
+        conn = mpc_data._connect()
+        try:
+            for home_name in cfg.get("homes", {}):
+                try:
+                    scen = hvac_supervisor.resolve_scenario(home_name, cfg, conn)
+                    strat = hvac_supervisor.home_strategy(home_name, cfg)
+                    if hvac_supervisor.scenario_action(scen["scenario"], strat) != "mpc":
+                        continue  # band_widen/baseline homes -> run_rbc_advisory
+                    inp = mpc_data.build_inputs(home_name, mpc_cfg=cfg, conn=conn)
+                    result = mpc_controller.solve_mpc(inp, mpc_cfg=cfg)
+                    if result.get("status") != "ok":
+                        _log.warning(f"MPC[{home_name}] no solution: "
+                                     f"{result.get('termination')}")
+                        continue
+                    result["operation_scenario"] = scen["scenario"]
+                    action_id = mpc_data.write_advisory(inp, result, conn=conn)
+                    _log.info(
+                        f"MPC advisory[{home_name}] scenario={scen['scenario']} "
+                        f"action_id={action_id} solver={result['solver']} "
+                        f"cool_setpoint={result.get('immediate_cool_setpoint_c')}C "
+                        f"cost=${result['expected_cost_usd']} "
+                        f"energy={result['expected_energy_kwh']}kWh "
+                        f"comfort_viol={result['comfort_violation_degC_steps']}")
+                except SystemExit as e:
+                    # build_inputs raises SystemExit for a missing model/data.
+                    _log.warning(f"MPC[{home_name}] skipped: {e}")
+                except Exception as e:
+                    _log.error(f"MPC[{home_name}] failed: {e}")
+        finally:
+            conn.close()
+
+    def run_rbc_advisory(self):
+        """Scenario-driven band-widening control (shadow mode) for every home
+        whose resolved action is 'band_widen' or 'baseline'.
+
+        Resolves each home's operation scenario via the supervisor. For
+        band_widen homes (RBC home in a DR/peak event, or any home in capacity/
+        resiliency shed) it widens the thermostat deadband by the per-scenario
+        offsets so the HVAC coasts to idle; for baseline homes (RBC home in
+        normal) it recommends the unchanged setpoints. To keep the audit log
+        clean it only writes when the resolved scenario changes for a device,
+        so the periodic can run often without flooding control_actions."""
+        try:
             try:
-                inp = mpc_data.build_inputs(home_name, mpc_cfg=cfg)
-                result = mpc_controller.solve_mpc(inp, mpc_cfg=cfg)
-                if result.get("status") != "ok":
-                    _log.warning(f"MPC[{home_name}] no solution: "
-                                 f"{result.get('termination')}")
-                    continue
-                action_id = mpc_data.write_advisory(inp, result)
-                _log.info(
-                    f"MPC advisory[{home_name}] action_id={action_id} "
-                    f"solver={result['solver']} "
-                    f"cool_setpoint={result.get('immediate_cool_setpoint_c')}C "
-                    f"cost=${result['expected_cost_usd']} "
-                    f"energy={result['expected_energy_kwh']}kWh "
-                    f"comfort_viol={result['comfort_violation_degC_steps']}")
-            except SystemExit as e:
-                # build_inputs raises SystemExit for a missing model/data.
-                _log.warning(f"MPC[{home_name}] skipped: {e}")
-            except Exception as e:
-                _log.error(f"MPC[{home_name}] failed: {e}")
+                from . import mpc_data, rbc_controller, hvac_supervisor
+            except ImportError:
+                import mpc_data
+                import rbc_controller
+                import hvac_supervisor
+        except Exception as e:
+            _log.warning(f"RBC advisory unavailable (missing dependency?): {e}")
+            return
+
+        try:
+            cfg = mpc_data._load_json("mpc_config.json")
+        except Exception as e:
+            _log.error(f"RBC advisory: could not load mpc_config.json: {e}")
+            return
+
+        conn = mpc_data._connect()
+        try:
+            for home_name in cfg.get("homes", {}):
+                try:
+                    scen = hvac_supervisor.resolve_scenario(home_name, cfg, conn)
+                    strat = hvac_supervisor.home_strategy(home_name, cfg)
+                    action = hvac_supervisor.scenario_action(scen["scenario"], strat)
+                    if action not in ("band_widen", "baseline"):
+                        continue  # 'mpc' homes -> run_mpc_advisory
+                    cool_off, heat_off = (
+                        hvac_supervisor.scenario_offsets(scen["scenario"], cfg)
+                        if action == "band_widen" else (0.0, 0.0))
+                    res = rbc_controller.relax_setpoints(
+                        home_name, cool_off, heat_off, mpc_cfg=cfg, conn=conn,
+                        scenario=scen["scenario"],
+                        triggered_by=hvac_supervisor.SCENARIO_TRIGGERED_BY.get(
+                            scen["scenario"], "ILC_agent"),
+                        active_events_brief=None)
+                    res["scenario_source"] = scen["source"]
+                    res["scenario_reason"] = scen["reason"]
+                    prev = hvac_supervisor.last_logged_scenario(conn, res["device_id"])
+                    if prev == scen["scenario"]:
+                        continue  # no scenario transition -> nothing new to log
+                    action_id = rbc_controller.write_rbc_advisory(res, mpc_cfg=cfg, conn=conn)
+                    _log.info(
+                        f"RBC advisory[{home_name}] scenario={scen['scenario']} "
+                        f"({scen['source']}) action={action} action_id={action_id} "
+                        f"cool {res['baseline_cool_setpoint_c']}->{res['recommended_cool_setpoint_c']}C "
+                        f"heat {res['baseline_heat_setpoint_c']}->{res['recommended_heat_setpoint_c']}C "
+                        f"idle_expected={res['hvac_expected_idle']}")
+                except SystemExit as e:
+                    _log.warning(f"RBC[{home_name}] skipped: {e}")
+                except Exception as e:
+                    _log.error(f"RBC[{home_name}] failed: {e}")
+        finally:
+            conn.close()
 
     # Additional helper methods for specific device types and strategies...
     def maintain_comfort_settings(self):
