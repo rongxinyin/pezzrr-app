@@ -81,6 +81,25 @@ class DatabaseManager:
         )
         return cur.fetchone()[0]
 
+    def upsert_weather_location(self, location_name, latitude, longitude,
+                                home_id=None, timezone="America/Los_Angeles"):
+        cur = self._cursor()
+        cur.execute(
+            """
+            INSERT INTO weather_locations
+                (location_name, latitude, longitude, home_id, timezone)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (location_name) DO UPDATE
+                SET latitude  = EXCLUDED.latitude,
+                    longitude = EXCLUDED.longitude,
+                    home_id   = EXCLUDED.home_id,
+                    timezone  = EXCLUDED.timezone
+            RETURNING location_id
+            """,
+            (location_name, latitude, longitude, home_id, timezone),
+        )
+        return cur.fetchone()[0]
+
     def upsert_panel_circuit(self, device_id, channel_num, circuit_name):
         cur = self._cursor()
         cur.execute(
@@ -218,6 +237,82 @@ class DatabaseManager:
                 row.get("hvac_mode"), row.get("hvac_state"),
                 row.get("fan_mode"), row.get("occupancy_status"),
                 row.get("hold_type"), row.get("hold_until"),
+            ),
+        )
+
+    def insert_weather_observation(self, row):
+        cur = self._cursor()
+        cur.execute(
+            """
+            INSERT INTO weather_observations
+                (location_id, ts, source,
+                 summary, icon,
+                 temp_c, apparent_temp_c, dew_point_c, humidity_pct,
+                 pressure_hpa, wind_speed_ms, wind_gust_ms, wind_bearing_deg,
+                 cloud_cover_pct, uv_index, visibility_km, ozone,
+                 precip_intensity_mmph, precip_probability_pct, precip_type)
+            VALUES (%s,%s,%s, %s,%s, %s,%s,%s,%s, %s,%s,%s,%s,
+                    %s,%s,%s,%s, %s,%s,%s)
+            ON CONFLICT (location_id, ts) DO UPDATE SET
+                source                 = EXCLUDED.source,
+                summary                = EXCLUDED.summary,
+                icon                   = EXCLUDED.icon,
+                temp_c                 = EXCLUDED.temp_c,
+                apparent_temp_c        = EXCLUDED.apparent_temp_c,
+                dew_point_c            = EXCLUDED.dew_point_c,
+                humidity_pct           = EXCLUDED.humidity_pct,
+                pressure_hpa           = EXCLUDED.pressure_hpa,
+                wind_speed_ms          = EXCLUDED.wind_speed_ms,
+                wind_gust_ms           = EXCLUDED.wind_gust_ms,
+                wind_bearing_deg       = EXCLUDED.wind_bearing_deg,
+                cloud_cover_pct        = EXCLUDED.cloud_cover_pct,
+                uv_index               = EXCLUDED.uv_index,
+                visibility_km          = EXCLUDED.visibility_km,
+                ozone                  = EXCLUDED.ozone,
+                precip_intensity_mmph  = EXCLUDED.precip_intensity_mmph,
+                precip_probability_pct = EXCLUDED.precip_probability_pct,
+                precip_type            = EXCLUDED.precip_type
+            """,
+            (
+                row["location_id"], row["ts"], row.get("source", "current"),
+                row.get("summary"), row.get("icon"),
+                row.get("temp_c"), row.get("apparent_temp_c"),
+                row.get("dew_point_c"), row.get("humidity_pct"),
+                row.get("pressure_hpa"), row.get("wind_speed_ms"),
+                row.get("wind_gust_ms"), row.get("wind_bearing_deg"),
+                row.get("cloud_cover_pct"), row.get("uv_index"),
+                row.get("visibility_km"), row.get("ozone"),
+                row.get("precip_intensity_mmph"),
+                row.get("precip_probability_pct"), row.get("precip_type"),
+            ),
+        )
+
+    def insert_weather_forecast(self, row):
+        cur = self._cursor()
+        cur.execute(
+            """
+            INSERT INTO weather_forecast
+                (location_id, generated_at, forecast_ts,
+                 summary, icon,
+                 temp_c, apparent_temp_c, dew_point_c, humidity_pct,
+                 pressure_hpa, wind_speed_ms, wind_gust_ms, wind_bearing_deg,
+                 cloud_cover_pct, uv_index, visibility_km, ozone,
+                 precip_intensity_mmph, precip_probability_pct, precip_type)
+            VALUES (%s,%s,%s, %s,%s, %s,%s,%s,%s, %s,%s,%s,%s,
+                    %s,%s,%s,%s, %s,%s,%s)
+            ON CONFLICT (location_id, generated_at, forecast_ts) DO NOTHING
+            """,
+            (
+                row["location_id"], row["generated_at"], row["forecast_ts"],
+                row.get("summary"), row.get("icon"),
+                row.get("temp_c"), row.get("apparent_temp_c"),
+                row.get("dew_point_c"), row.get("humidity_pct"),
+                row.get("pressure_hpa"), row.get("wind_speed_ms"),
+                row.get("wind_gust_ms"), row.get("wind_bearing_deg"),
+                row.get("cloud_cover_pct"), row.get("uv_index"),
+                row.get("visibility_km"), row.get("ozone"),
+                row.get("precip_intensity_mmph"),
+                row.get("precip_probability_pct"), row.get("precip_type"),
             ),
         )
 

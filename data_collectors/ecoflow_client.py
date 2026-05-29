@@ -104,3 +104,11 @@ class EcoFlowClient:
         return self.make_request(
             f"/iot-open/sign/device/quota/all?sn={sn}",
         )
+
+    def get_device_list(self):
+        """Return {sn: is_online} for all devices on this account."""
+        data = self.make_request("/iot-open/sign/device/list")
+        if data is None:
+            return {}
+        devices = data if isinstance(data, list) else data.get("list", [])
+        return {d["sn"]: bool(d.get("online", 0)) for d in devices}

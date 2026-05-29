@@ -75,6 +75,23 @@ def get_openadr_config():
     return _load_json("openadr_config.json")
 
 
+def get_darksky_config():
+    return _load_json("darksky_config.json")
+
+
+def iter_weather_locations():
+    """Yield a flat config dict for each weather location.
+
+    Shared top-level keys (api_key, api_base_url, units, exclude) are
+    merged in; per-location keys (location_name, latitude, longitude,
+    home_name, timezone) take precedence — ready to pass to DarkSkyClient.
+    """
+    cfg = get_darksky_config()
+    shared = {k: v for k, v in cfg.items() if k != "locations"}
+    for location in cfg.get("locations", []):
+        yield {**shared, **location}
+
+
 def get_db_config():
     return _load_json("data_analytics_config.json")["database"]
 

@@ -9,8 +9,15 @@ import signal
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 
-from .config import iter_ecoflow_devices, iter_ecobee_accounts, get_openadr_config
+from .config import (
+    iter_ecoflow_devices,
+    iter_ecobee_accounts,
+    get_openadr_config,
+    get_darksky_config,
+    iter_weather_locations,
+)
 from .db import DatabaseManager
 from .ecoflow_client import EcoFlowClient
 from .ecoflow_transformer import (
@@ -21,6 +28,8 @@ from .ecoflow_transformer import (
 from .ecobee_client import EcobeeClient
 from .ecobee_transformer import transform_thermostat_reading, dedup_key
 from .openadr_client import OpenADRClient
+from .darksky_client import DarkSkyClient
+from .darksky_transformer import transform_current, transform_hourly_forecast
 
 log = logging.getLogger(__name__)
 
@@ -47,11 +56,15 @@ class DataCollector:
         t_adr = threading.Thread(
             target=self._openadr_loop, name="openadr-poll", daemon=True
         )
+        t_wx = threading.Thread(
+            target=self._weather_loop, name="weather-poll", daemon=True
+        )
 
         log.info("Starting data collection (Ctrl-C to stop) ...")
         t_eco.start()
         t_bee.start()
         t_adr.start()
+        t_wx.start()
 
         # Block main thread until stop signal
         while not self._stop_event.is_set():
@@ -339,6 +352,82 @@ class DataCollector:
                     )
             except Exception:
                 log.error("OpenADR poll error:\n%s", traceback.format_exc())
+
+            self._stop_event.wait(poll_interval)
+
+        db.close()
+
+    # ------------------------------------------------------------------
+    # Weather (Dark Sky) polling loop
+    # ------------------------------------------------------------------
+    def _weather_loop(self):
+        cfg = get_darksky_config()
+        api_key = cfg.get("api_key", "")
+        if not api_key or api_key == "YOUR_DARKSKY_KEY":
+            log.warning("Dark Sky API key not configured — weather loop disabled. "
+                        "Set api_key in config/darksky_config.json.")
+            return
+
+        poll_interval = int(cfg.get("poll_interval", POLL_INTERVAL))
+
+        db = DatabaseManager()
+        db.connect()
+        client = DarkSkyClient(cfg)
+
+        # Upsert each configured location and resolve its location_id once
+        locations = []
+        for loc in iter_weather_locations():
+            home_id = db.get_home_id(loc["home_name"]) if loc.get("home_name") else None
+            location_id = db.upsert_weather_location(
+                location_name=loc["location_name"],
+                latitude=loc["latitude"],
+                longitude=loc["longitude"],
+                home_id=home_id,
+                timezone=loc.get("timezone", "America/Los_Angeles"),
+            )
+            locations.append({
+                "location_id": location_id,
+                "name": loc["location_name"],
+                "latitude": loc["latitude"],
+                "longitude": loc["longitude"],
+            })
+
+        if not locations:
+            log.error("No weather locations configured. Add them to "
+                      "config/darksky_config.json.")
+            db.close()
+            return
+
+        log.info("Weather loop ready: %d location(s), interval=%ds",
+                 len(locations), poll_interval)
+
+        while not self._stop_event.is_set():
+            for loc in locations:
+                try:
+                    data = client.get_forecast(loc["latitude"], loc["longitude"])
+
+                    obs = transform_current(data, loc["location_id"])
+                    if obs:
+                        db.insert_weather_observation(obs)
+
+                    generated_at = datetime.now(timezone.utc)
+                    fc_rows = transform_hourly_forecast(
+                        data, loc["location_id"], generated_at
+                    )
+                    for row in fc_rows:
+                        db.insert_weather_forecast(row)
+
+                    log.info(
+                        "Weather [%s]: %.1f°C  %s  humidity=%s%%  forecast=%dh",
+                        loc["name"],
+                        (obs or {}).get("temp_c") or 0,
+                        (obs or {}).get("icon") or "?",
+                        round((obs or {}).get("humidity_pct") or 0),
+                        len(fc_rows),
+                    )
+                except Exception:
+                    log.error("Weather poll error for %s:\n%s",
+                              loc["name"], traceback.format_exc())
 
             self._stop_event.wait(poll_interval)
 
