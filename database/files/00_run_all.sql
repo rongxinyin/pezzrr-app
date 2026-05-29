@@ -7,7 +7,7 @@
 --   psql -U <user> -d <database> -f 00_run_all.sql
 --
 -- Or from shell:
---   for f in 0{1..7}_*.sql; do psql -U <user> -d <database> -f "$f"; done
+--   for f in 0{1..8}_*.sql; do psql -U <user> -d <database> -f "$f"; done
 -- =============================================================
 
 \echo '=== [1/7] Core reference tables (homes, devices) ==='
@@ -28,8 +28,11 @@
 \echo '=== [6/7] Demand Response & Control Action tables ==='
 \i 06_demand_response_control.sql
 
-\echo '=== [7/7] Aggregation & Reporting tables ==='
+\echo '=== [7/8] Aggregation & Reporting tables ==='
 \i 07_aggregations.sql
+
+\echo '=== [8/8] Weather (Dark Sky) tables ==='
+\i 08_weather.sql
 
 \echo '=== Schema creation complete ==='
 
@@ -49,7 +52,8 @@ WHERE schemaname = 'public'
         'thermostat_readings', 'thermostat_runtime',
         'smart_plug_readings',
         'dr_events', 'dr_event_participants', 'control_actions',
-        'hourly_energy_summary', 'daily_home_summary'
+        'hourly_energy_summary', 'daily_home_summary',
+        'weather_locations', 'weather_observations', 'weather_forecast'
   )
 
 UNION ALL

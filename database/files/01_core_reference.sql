@@ -77,13 +77,17 @@ CREATE TABLE IF NOT EXISTS devices (
     firmware_version        VARCHAR(50),
     installed_at            TIMESTAMPTZ,
     is_active               BOOLEAN             NOT NULL DEFAULT TRUE,
+    is_online               BOOLEAN,                    -- last known connectivity from vendor API (NULL = never checked)
+    online_updated_at       TIMESTAMPTZ,                -- when is_online was last refreshed
     metadata                JSONB,                      -- flexible extra fields per device type
     created_at              TIMESTAMPTZ         NOT NULL DEFAULT NOW()
 );
 
 COMMENT ON TABLE  devices IS 'Physical devices at each home: smart panels, batteries, thermostats, smart plugs.';
-COMMENT ON COLUMN devices.api_identifier IS 'Device-specific API key: EcoFlow serial number, Ecobee thermostatId, or Matter node ID.';
-COMMENT ON COLUMN devices.metadata       IS 'JSONB bag for device-specific config (rated power, circuit count, etc.).';
+COMMENT ON COLUMN devices.api_identifier     IS 'Device-specific API key: EcoFlow serial number, Ecobee thermostatId, or Matter node ID.';
+COMMENT ON COLUMN devices.is_online         IS 'Last known connectivity status from the vendor API (NULL = never checked).';
+COMMENT ON COLUMN devices.online_updated_at IS 'Timestamp when is_online was last refreshed.';
+COMMENT ON COLUMN devices.metadata          IS 'JSONB bag for device-specific config (rated power, circuit count, etc.).';
 
 CREATE INDEX IF NOT EXISTS idx_devices_home_id ON devices(home_id);
 CREATE INDEX IF NOT EXISTS idx_devices_type    ON devices(device_type);
