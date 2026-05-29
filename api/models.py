@@ -79,6 +79,21 @@ class HomeDetail(BaseModel):
     status: StatusSnapshot
 
 
+class FleetStatusItem(BaseModel):
+    home_id: int
+    home_name: str
+    city: Optional[str] = None
+    status: str  # ok | watch | act | offline
+    gateway_online: bool
+    enrolled_dr: bool
+    dr_active: bool
+    home_load_w: Optional[float] = None
+    grid_power_w: Optional[float] = None
+    solar_power_w: Optional[float] = None
+    battery_soc_pct: Optional[float] = None
+    panel_ts: Optional[datetime] = None
+
+
 class FleetDailyRow(BaseModel):
     date: date
     homes_reporting: Optional[int] = None

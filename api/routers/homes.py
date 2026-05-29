@@ -12,6 +12,7 @@ from ..db import db
 from ..models import (
     Device,
     FleetDailyRow,
+    FleetStatusItem,
     HomeDetail,
     HomeSummaryItem,
     PanelSnapshot,
@@ -121,6 +122,89 @@ async def get_home(home_id: int, user: User = Depends(require("viewer", home_par
         devices=[Device(**dict(r)) for r in device_rows],
         status=snapshot,
     )
+
+
+_SOC_WATCH = 35.0
+
+
+def _derive_status(row) -> str:
+    """status ∈ {offline, act, watch, ok} per design §7."""
+    if not row["gateway_online"]:
+        return "offline"
+    if row["eps_mode_active"] or row["grid_status"] == 0 or row["dr_active"]:
+        return "act"
+    soc = row["battery_soc"] if row["battery_soc"] is not None else row["panel_soc"]
+    if soc is not None and float(soc) < _SOC_WATCH:
+        return "watch"
+    return "ok"
+
+
+@router.get("/fleet/status", response_model=list[FleetStatusItem])
+async def fleet_status(user: User = Depends(get_current_user)):
+    """Live per-home rollup for the overview grid (design §7).
+
+    Latest panel + battery readings, gateway online flag, and whether the
+    home is in an active DR event, with a derived status. Scoped to the
+    homes the caller can access.
+    """
+    from ..auth import ALL_HOMES_ROLES
+
+    sql = """
+        SELECT h.home_id, h.home_name, h.city, h.enrolled_dr,
+               p.ts AS panel_ts, p.home_load_w, p.grid_power_w, p.solar_power_w,
+               p.grid_status, p.eps_mode_active, p.battery_soc_pct AS panel_soc,
+               b.soc_pct AS battery_soc,
+               COALESCE(dev.gateway_online, FALSE) AS gateway_online,
+               COALESCE(dr.active, FALSE) AS dr_active
+        FROM homes h
+        LEFT JOIN LATERAL (
+            SELECT ts, home_load_w, grid_power_w, solar_power_w,
+                   grid_status, eps_mode_active, battery_soc_pct
+            FROM smart_panel_readings WHERE home_id = h.home_id
+            ORDER BY ts DESC LIMIT 1
+        ) p ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT soc_pct FROM battery_readings WHERE home_id = h.home_id
+            ORDER BY ts DESC LIMIT 1
+        ) b ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT bool_or(is_online) AS gateway_online
+            FROM devices WHERE home_id = h.home_id AND is_active
+        ) dev ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT TRUE AS active FROM dr_event_participants dep
+            JOIN dr_events e ON e.event_id = dep.event_id
+            WHERE dep.home_id = h.home_id AND e.status = 'active'
+              AND e.event_start <= NOW() AND e.event_end > NOW()
+            LIMIT 1
+        ) dr ON TRUE
+    """
+    if user.role in ALL_HOMES_ROLES:
+        rows = await db.fetch(sql + " ORDER BY h.home_id")
+    else:
+        rows = await db.fetch(
+            sql + " WHERE h.home_id = ANY($1::int[]) ORDER BY h.home_id",
+            user.homes,
+        )
+
+    out = []
+    for r in rows:
+        soc = r["battery_soc"] if r["battery_soc"] is not None else r["panel_soc"]
+        out.append(FleetStatusItem(
+            home_id=r["home_id"],
+            home_name=r["home_name"],
+            city=r["city"],
+            status=_derive_status(r),
+            gateway_online=r["gateway_online"],
+            enrolled_dr=r["enrolled_dr"],
+            dr_active=r["dr_active"],
+            home_load_w=_round_w(r["home_load_w"]),
+            grid_power_w=_round_w(r["grid_power_w"]),
+            solar_power_w=_round_w(r["solar_power_w"]),
+            battery_soc_pct=_round1(soc),
+            panel_ts=r["panel_ts"],
+        ))
+    return out
 
 
 @router.get("/fleet/summary", response_model=list[FleetDailyRow])
