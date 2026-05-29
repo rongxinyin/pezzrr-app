@@ -14,12 +14,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..auth import User, require
 from ..buckets import resolve_window
 from ..db import db
 
 router = APIRouter(prefix="/api/v1", tags=["telemetry"])
+
+# All telemetry is home-scoped: any authenticated caller with access to the home.
+_scoped = require("viewer", home_param="home_id")
 
 
 def _w(v):
@@ -56,6 +60,7 @@ async def panel(
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
     bucket: str = Query("5m"),
+    user: User = Depends(_scoped),
 ):
     await _ensure_home(home_id)
     start, end, interval = resolve_window(date_from, date_to, bucket)
@@ -120,6 +125,7 @@ async def circuits(
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
     bucket: str = Query("5m"),
+    user: User = Depends(_scoped),
 ):
     await _ensure_home(home_id)
     start, end, interval = resolve_window(date_from, date_to, bucket)
@@ -187,6 +193,7 @@ async def battery(
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
     bucket: str = Query("5m"),
+    user: User = Depends(_scoped),
 ):
     await _ensure_home(home_id)
     start, end, interval = resolve_window(date_from, date_to, bucket)
@@ -215,6 +222,7 @@ async def thermostat(
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
     bucket: str = Query("5m"),
+    user: User = Depends(_scoped),
 ):
     await _ensure_home(home_id)
     start, end, interval = resolve_window(date_from, date_to, bucket)
@@ -245,6 +253,7 @@ async def plugs(
     date_from: Optional[datetime] = Query(None, alias="from"),
     date_to: Optional[datetime] = Query(None, alias="to"),
     bucket: str = Query("5m"),
+    user: User = Depends(_scoped),
 ):
     await _ensure_home(home_id)
     start, end, interval = resolve_window(date_from, date_to, bucket)

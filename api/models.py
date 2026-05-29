@@ -8,6 +8,24 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    homes: list[int]
+
+
+class MeResponse(BaseModel):
+    user_id: int
+    role: str
+    homes: list[int]
+
+
 class HomeSummaryItem(BaseModel):
     home_id: int
     home_name: str

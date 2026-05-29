@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..auth import User, get_current_user, require
 from ..db import db
 from ..models import (
     Device,
@@ -44,22 +45,41 @@ def _panel_snapshot(row) -> PanelSnapshot:
 
 
 @router.get("/homes", response_model=list[HomeSummaryItem])
-async def list_homes():
-    """All homes with a derived gateway_online flag (any device online)."""
-    rows = await db.fetch(
-        """SELECT h.home_id, h.home_name, h.city, h.state, h.timezone,
-                  h.enrolled_dr, h.gateway_id,
-                  COALESCE(bool_or(d.is_online), FALSE) AS gateway_online
-           FROM homes h
-           LEFT JOIN devices d ON d.home_id = h.home_id AND d.is_active
-           GROUP BY h.home_id
-           ORDER BY h.home_id"""
-    )
+async def list_homes(user: User = Depends(get_current_user)):
+    """Homes the caller can access, with a derived gateway_online flag.
+
+    Fleet roles (fleet_analyst/admin) see all homes; viewer/operator see only
+    homes in their access list.
+    """
+    from ..auth import ALL_HOMES_ROLES
+
+    if user.role in ALL_HOMES_ROLES:
+        rows = await db.fetch(
+            """SELECT h.home_id, h.home_name, h.city, h.state, h.timezone,
+                      h.enrolled_dr, h.gateway_id,
+                      COALESCE(bool_or(d.is_online), FALSE) AS gateway_online
+               FROM homes h
+               LEFT JOIN devices d ON d.home_id = h.home_id AND d.is_active
+               GROUP BY h.home_id
+               ORDER BY h.home_id"""
+        )
+    else:
+        rows = await db.fetch(
+            """SELECT h.home_id, h.home_name, h.city, h.state, h.timezone,
+                      h.enrolled_dr, h.gateway_id,
+                      COALESCE(bool_or(d.is_online), FALSE) AS gateway_online
+               FROM homes h
+               LEFT JOIN devices d ON d.home_id = h.home_id AND d.is_active
+               WHERE h.home_id = ANY($1::int[])
+               GROUP BY h.home_id
+               ORDER BY h.home_id""",
+            user.homes,
+        )
     return [HomeSummaryItem(**dict(r)) for r in rows]
 
 
 @router.get("/homes/{home_id}", response_model=HomeDetail)
-async def get_home(home_id: int):
+async def get_home(home_id: int, user: User = Depends(require("viewer", home_param="home_id"))):
     """Home record + its devices + the latest panel/battery status snapshot."""
     home = await db.fetchrow(
         """SELECT home_id, home_name, address, city, state, zip_code,
@@ -107,6 +127,7 @@ async def get_home(home_id: int):
 async def fleet_summary(
     date_from: Optional[date] = Query(None, alias="from"),
     date_to: Optional[date] = Query(None, alias="to"),
+    user: User = Depends(require("operator")),
 ):
     """Rows from the fleet_daily_summary materialized view, optional date range."""
     clauses = []
