@@ -1,2 +1,8 @@
 # volttron>=10.0
 transitions>=0.9.0
+# Thermostat MPC (advisory/shadow mode)
+numpy>=1.24
+psycopg2-binary>=2.9
+pyomo>=6.7
+highspy>=1.7
+pyscipopt>=5.0

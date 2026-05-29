@@ -161,6 +161,7 @@ class SmartHomeILCAgent(Agent):
         self.core.periodic(60)(self.monitor_system)  # Every minute
         self.core.periodic(300)(self.optimize_loads)  # Every 5 minutes
         self.core.periodic(3600)(self.update_forecasts)  # Every hour
+        self.core.periodic(900)(self.run_mpc_advisory)  # MPC advisory, every 15 min (matches dt)
 
     def handle_ecobee_data(self, peer, sender, bus, topic, headers, message):
         """Handle Ecobee thermostat data"""
@@ -499,6 +500,52 @@ class SmartHomeILCAgent(Agent):
             
         except Exception as e:
             _log.error(f"Error updating forecasts: {e}")
+
+    def run_mpc_advisory(self):
+        """Compute thermostat MPC setpoint advisories (shadow mode) for every
+        home configured in mpc_config.json and log them to control_actions.
+
+        Advisory only: nothing is sent to the thermostats. Each home is handled
+        independently; homes without a fitted RC model or recent data are
+        skipped with a warning. The MPC modules talk to the database directly,
+        so this runs outside the VOLTTRON message bus."""
+        try:
+            try:
+                from . import mpc_data, mpc_controller
+            except ImportError:
+                import mpc_data
+                import mpc_controller
+        except Exception as e:
+            _log.warning(f"MPC advisory unavailable (missing dependency?): {e}")
+            return
+
+        try:
+            cfg = mpc_data._load_json("mpc_config.json")
+        except Exception as e:
+            _log.error(f"MPC advisory: could not load mpc_config.json: {e}")
+            return
+
+        for home_name in cfg.get("homes", {}):
+            try:
+                inp = mpc_data.build_inputs(home_name, mpc_cfg=cfg)
+                result = mpc_controller.solve_mpc(inp, mpc_cfg=cfg)
+                if result.get("status") != "ok":
+                    _log.warning(f"MPC[{home_name}] no solution: "
+                                 f"{result.get('termination')}")
+                    continue
+                action_id = mpc_data.write_advisory(inp, result)
+                _log.info(
+                    f"MPC advisory[{home_name}] action_id={action_id} "
+                    f"solver={result['solver']} "
+                    f"cool_setpoint={result.get('immediate_cool_setpoint_c')}C "
+                    f"cost=${result['expected_cost_usd']} "
+                    f"energy={result['expected_energy_kwh']}kWh "
+                    f"comfort_viol={result['comfort_violation_degC_steps']}")
+            except SystemExit as e:
+                # build_inputs raises SystemExit for a missing model/data.
+                _log.warning(f"MPC[{home_name}] skipped: {e}")
+            except Exception as e:
+                _log.error(f"MPC[{home_name}] failed: {e}")
 
     # Additional helper methods for specific device types and strategies...
     def maintain_comfort_settings(self):
