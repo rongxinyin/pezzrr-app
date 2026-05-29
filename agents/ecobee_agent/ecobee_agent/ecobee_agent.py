@@ -408,6 +408,7 @@ class EcobeeAgent(Agent):
                         'selectionType': 'registered',
                         'selectionMatch': '',
                         'includeRuntime': True,
+                        'includeEquipmentStatus': True,
                         'includeSettings': True,
                         'includeWeather': True,
                         'includeEvents': True
@@ -451,8 +452,10 @@ class EcobeeAgent(Agent):
             cool_setpoint = runtime.get('desiredCool', 0) / 10.0
             hvac_mode = settings.get('hvacMode', 'off')
             
-            # Current HVAC state
-            hvac_state = self._determine_hvac_state(runtime)
+            # Current HVAC state. equipmentStatus is a top-level field on the
+            # thermostat object (only returned with includeEquipmentStatus), NOT
+            # under runtime — reading it from runtime always yields '' (idle).
+            hvac_state = self._determine_hvac_state(thermostat)
             
             # Prepare data for publishing
             device_data = {
@@ -473,9 +476,10 @@ class EcobeeAgent(Agent):
         except Exception as e:
             _log.error(f"Error processing thermostat data: {e}")
 
-    def _determine_hvac_state(self, runtime):
-        """Determine current HVAC operating state"""
-        equipment_status = runtime.get('equipmentStatus', '')
+    def _determine_hvac_state(self, thermostat):
+        """Determine current HVAC operating state from the thermostat's
+        top-level equipmentStatus string (requires includeEquipmentStatus)."""
+        equipment_status = thermostat.get('equipmentStatus', '')
         
         if 'heatPump' in equipment_status or 'auxHeat' in equipment_status:
             return 'heating'
