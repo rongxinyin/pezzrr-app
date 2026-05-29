@@ -95,6 +95,7 @@ class DataCollector:
             if battery_device_id is None:
                 battery_device_id = panel_device_id
             circuit_map = db.get_circuit_map(panel_device_id) if panel_device_id else {}
+            voltage_map = db.get_circuit_voltage_map(panel_device_id) if panel_device_id else {}
 
             if not home_id or not panel_device_id:
                 log.warning(
@@ -111,6 +112,7 @@ class DataCollector:
                 "panel_device_id": panel_device_id,
                 "battery_device_id": battery_device_id,
                 "circuit_map": circuit_map,
+                "voltage_map": voltage_map,
                 "label": f"{home_name}/{device_sn}",
             })
 
@@ -143,7 +145,8 @@ class DataCollector:
                     db.insert_smart_panel_reading(panel_row)
 
                     circuit_rows = transform_circuit_readings(
-                        data, info["panel_device_id"], info["home_id"], info["circuit_map"]
+                        data, info["panel_device_id"], info["home_id"],
+                        info["circuit_map"], info["voltage_map"]
                     )
                     for row in circuit_rows:
                         db.insert_panel_circuit_reading(row)

@@ -125,6 +125,7 @@ def run_backfill(polls: int = 60, interval: int = 30):
         panel_id = db.get_device_id(sn)
         bat_id = db.get_device_id(sn + "-BAT") or panel_id
         circuit_map = db.get_circuit_map(panel_id) if panel_id else {}
+        voltage_map = db.get_circuit_voltage_map(panel_id) if panel_id else {}
 
         if not home_id or not panel_id:
             log.warning("No seed data for %s/%s — run 'seed' first", home_name, sn)
@@ -137,6 +138,7 @@ def run_backfill(polls: int = 60, interval: int = 30):
             "panel_id": panel_id,
             "bat_id": bat_id,
             "circuit_map": circuit_map,
+            "voltage_map": voltage_map,
             "label": f"{home_name}/{sn}",
             "sn": sn,
         })
@@ -175,7 +177,8 @@ def run_backfill(polls: int = 60, interval: int = 30):
                 db.insert_smart_panel_reading(panel_row)
 
                 circuit_rows = transform_circuit_readings(
-                    data, d["panel_id"], d["home_id"], d["circuit_map"]
+                    data, d["panel_id"], d["home_id"],
+                    d["circuit_map"], d["voltage_map"]
                 )
                 for row in circuit_rows:
                     db.insert_panel_circuit_reading(row)

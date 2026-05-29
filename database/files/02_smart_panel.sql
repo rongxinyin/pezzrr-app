@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS panel_circuits (
     channel_num         SMALLINT        NOT NULL CHECK (channel_num BETWEEN 1 AND 12),
     circuit_name        VARCHAR(100),               -- "HVAC", "Kitchen", "EV Charger", etc.
     rated_amps          NUMERIC(6,2),               -- Breaker amperage rating
+    rated_voltage       NUMERIC(6,2),               -- Branch voltage (120 or 240); NULL = use collector default
     is_critical         BOOLEAN         NOT NULL DEFAULT FALSE,  -- Cannot be curtailed during DR
     is_controllable     BOOLEAN         NOT NULL DEFAULT TRUE,   -- ILC can control this circuit
     load_description    TEXT,                       -- Free-text description of the load

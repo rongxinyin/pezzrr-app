@@ -10,6 +10,13 @@ def _now_utc():
     return datetime.now(timezone.utc)
 
 
+# Branch voltage used to derive current_a from the API's per-channel watts.
+# The SHP2 API reports per-circuit load in watts only (no measured amps), so
+# current is derived as I = P / V. Most branches are 120 V; 240 V loads (AC,
+# dryer) get a per-channel override via voltage_map once those are mapped.
+DEFAULT_CIRCUIT_VOLTAGE_V = 120.0
+
+
 # ------------------------------------------------------------------
 # smart_panel_readings
 # ------------------------------------------------------------------
@@ -60,9 +67,16 @@ def transform_panel_reading(data, device_id, home_id):
 # ------------------------------------------------------------------
 # panel_circuit_readings  (12 rows)
 # ------------------------------------------------------------------
-def transform_circuit_readings(data, device_id, home_id, circuit_map):
-    """Return list of dicts, one per circuit."""
+def transform_circuit_readings(data, device_id, home_id, circuit_map,
+                               voltage_map=None, default_voltage_v=DEFAULT_CIRCUIT_VOLTAGE_V):
+    """Return list of dicts, one per circuit.
+
+    The SHP2 API exposes per-channel load in watts only, so current_a is
+    derived as power_w / voltage. `voltage_map` is an optional
+    {channel_num: volts} override (e.g. 240 for the AC/dryer branches); any
+    channel not in it uses `default_voltage_v`."""
     hall1_watt = data.get("loadInfo.hall1Watt", [])
+    voltage_map = voltage_map or {}
     ts = _now_utc()
     rows = []
 
@@ -73,6 +87,9 @@ def transform_circuit_readings(data, device_id, home_id, circuit_map):
 
         arr_idx = ch_num - 1  # hall1Watt list is 0-indexed
         power = hall1_watt[arr_idx] if arr_idx < len(hall1_watt) else 0.0
+
+        volts = voltage_map.get(ch_num, default_voltage_v)
+        current = power / volts if volts else None
 
         load_sta = data.get(
             f"pd303_mc.loadIncreInfo.hall1IncreInfo.ch{ch_num}Sta.loadSta",
@@ -86,6 +103,8 @@ def transform_circuit_readings(data, device_id, home_id, circuit_map):
             "home_id": home_id,
             "ts": ts,
             "power_w": power,
+            "current_a": current,
+            "voltage_v": volts,
             "is_enabled": is_enabled,
         })
 

@@ -149,6 +149,18 @@ class DatabaseManager:
             (device_id,))
         return {row[0]: row[1] for row in cur.fetchall()}
 
+    def get_circuit_voltage_map(self, device_id):
+        """Return {channel_num: rated_voltage} for circuits that have one set.
+
+        Channels with NULL rated_voltage are omitted so the collector's default
+        branch voltage applies to them."""
+        cur = self._cursor()
+        cur.execute(
+            "SELECT channel_num, rated_voltage FROM panel_circuits "
+            "WHERE device_id = %s AND rated_voltage IS NOT NULL",
+            (device_id,))
+        return {row[0]: float(row[1]) for row in cur.fetchall()}
+
     def update_device_online_status(self, serial_number, is_online):
         cur = self._cursor()
         cur.execute(
@@ -189,12 +201,14 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT INTO panel_circuit_readings
-                (circuit_id, device_id, home_id, ts, power_w, is_enabled)
-            VALUES (%s,%s,%s,%s,%s,%s)
+                (circuit_id, device_id, home_id, ts,
+                 power_w, current_a, voltage_v, is_enabled)
+            VALUES (%s,%s,%s,%s, %s,%s,%s,%s)
             """,
             (
                 row["circuit_id"], row["device_id"], row["home_id"],
-                row["ts"], row.get("power_w"), row.get("is_enabled"),
+                row["ts"], row.get("power_w"), row.get("current_a"),
+                row.get("voltage_v"), row.get("is_enabled"),
             ),
         )
 
