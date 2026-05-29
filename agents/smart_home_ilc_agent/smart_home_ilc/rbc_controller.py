@@ -82,23 +82,26 @@ def _event_brief(ev):
 
 
 # =====================================================================
-# Compute recommendation
+# Setpoint relaxation (band widening)
 # =====================================================================
-def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
-    """Compute the RBC setpoint recommendation for one home.
+def relax_setpoints(home_name, cool_offset_f, heat_offset_f, mpc_cfg=None,
+                    now_utc=None, conn=None, scenario="load_peak_management",
+                    triggered_by="DR_event", active_events_brief=None):
+    """Widen the thermostat band unconditionally by the given offsets.
 
-    Returns a result dict (status, event_active, baseline/recommended setpoints,
-    the relaxed comfort band, and whether the HVAC is expected to idle)."""
+    Raises the cooling setpoint by cool_offset_f and lowers the heating setpoint
+    by heat_offset_f (degrees F, asymmetric per the controller memo). Offsets of
+    0 leave the setpoint at baseline (the 'normal' / no-shed case). This is the
+    primitive the scenario supervisor drives; compute_rbc() wraps it for the
+    standalone event-triggered RBC. Returns the advisory result dict."""
     mpc_cfg = mpc_cfg or mpc_data._load_json("mpc_config.json")
     if home_name not in mpc_cfg["homes"]:
         raise SystemExit(f"{home_name!r} not configured in mpc_config.json")
     hc = mpc_cfg["homes"][home_name]
-    rbc_cfg = mpc_cfg["defaults"].get("rbc", {})
-    offset_f = float(rbc_cfg.get("setpoint_offset_f", 2.0))
-    offset_c = f_offset_to_c(offset_f)
-    trigger_cfg = rbc_cfg.get("trigger", {})
     mode = hc.get("mode", "both")
     comfort = hc.get("comfort", {})
+    cool_off_c = f_offset_to_c(cool_offset_f)
+    heat_off_c = f_offset_to_c(heat_offset_f)
 
     now_utc = now_utc or datetime.now(timezone.utc)
     own = conn is None
@@ -120,35 +123,29 @@ def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
         base_heat = float(base_heat) if base_heat is not None else None
         indoor = float(state["indoor_temp_c"])
 
-        evs = active_events(conn, now_utc)
-        triggers = [e for e in evs if is_trigger_event(e, trigger_cfg)]
-        event_active = bool(triggers)
-
         do_cool = mode in ("cool", "both")
         do_heat = mode in ("heat", "both")
-        rec_cool, rec_heat = base_cool, base_heat
-        if event_active:
-            if do_cool and base_cool is not None:
-                rec_cool = base_cool + offset_c   # raise cooling setpoint
-            if do_heat and base_heat is not None:
-                rec_heat = base_heat - offset_c   # lower heating setpoint
+        rec_cool = base_cool + cool_off_c if (do_cool and base_cool is not None) else base_cool
+        rec_heat = base_heat - heat_off_c if (do_heat and base_heat is not None) else base_heat
 
         # With the widened band the HVAC should idle if indoor sits inside it.
         idle = ((rec_cool is None or indoor <= rec_cool) and
                 (rec_heat is None or indoor >= rec_heat))
+        relaxed = bool(cool_offset_f or heat_offset_f)
 
         return {
             "status": "ok",
-            "control_strategy": "rbc",
+            "controller": "rbc",
+            "operation_scenario": scenario,
+            "triggered_by": triggered_by,
             "home_id": home_id,
             "device_id": device_id,
             "now_utc": now_utc.isoformat(),
-            "event_active": event_active,
-            "active_events": [_event_brief(e) for e in triggers],
-            "n_events_overlapping": len(evs),
+            "band_relaxed": relaxed,
+            "active_events": active_events_brief or [],
             "mode": mode,
-            "offset_f": offset_f,
-            "offset_c": round(offset_c, 4),
+            "cool_offset_f": cool_offset_f,
+            "heat_offset_f": heat_offset_f,
             "indoor_temp_c": round(indoor, 3),
             "baseline_cool_setpoint_c": base_cool,
             "baseline_heat_setpoint_c": base_heat,
@@ -161,6 +158,47 @@ def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
             "hvac_expected_idle": idle,
             "indoor_reading_ts": state["ts"].isoformat(),
         }
+    finally:
+        if own:
+            conn.close()
+
+
+# =====================================================================
+# Standalone event-triggered RBC
+# =====================================================================
+def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
+    """Standalone RBC: detect an active DR/outage event and, if present, relax
+    the band by the configured rbc offsets; otherwise recommend baseline.
+
+    Returns a result dict with event_active plus the relaxed setpoints. The
+    scenario supervisor uses relax_setpoints() directly instead of this."""
+    mpc_cfg = mpc_cfg or mpc_data._load_json("mpc_config.json")
+    if home_name not in mpc_cfg["homes"]:
+        raise SystemExit(f"{home_name!r} not configured in mpc_config.json")
+    rbc_cfg = mpc_cfg["defaults"].get("rbc", {})
+    # Asymmetric offsets if given, else the single symmetric setpoint_offset_f.
+    sym = float(rbc_cfg.get("setpoint_offset_f", 2.0))
+    cool_off = float(rbc_cfg.get("cool_offset_f", sym))
+    heat_off = float(rbc_cfg.get("heat_offset_f", sym))
+    trigger_cfg = rbc_cfg.get("trigger", {})
+
+    now_utc = now_utc or datetime.now(timezone.utc)
+    own = conn is None
+    conn = conn or mpc_data._connect()
+    try:
+        evs = active_events(conn, now_utc)
+        triggers = [e for e in evs if is_trigger_event(e, trigger_cfg)]
+        event_active = bool(triggers)
+        brief = [_event_brief(e) for e in triggers]
+        c, h = (cool_off, heat_off) if event_active else (0.0, 0.0)
+        res = relax_setpoints(
+            home_name, c, h, mpc_cfg=mpc_cfg, now_utc=now_utc, conn=conn,
+            scenario="load_peak_management",
+            triggered_by=rbc_cfg.get("triggered_by", "DR_event"),
+            active_events_brief=brief)
+        res["event_active"] = event_active
+        res["n_events_overlapping"] = len(evs)
+        return res
     finally:
         if own:
             conn.close()
@@ -229,7 +267,7 @@ def main():
           f"heat={res['baseline_heat_setpoint_c']} C")
     print(f"  recommend cool={res['recommended_cool_setpoint_c']} "
           f"heat={res['recommended_heat_setpoint_c']} C "
-          f"(offset {res['offset_f']}F = {res['offset_c']}C)")
+          f"(offset cool +{res['cool_offset_f']}F heat -{res['heat_offset_f']}F)")
     print(f"  relaxed band {res['relaxed_band_c']} C  hvac_expected_idle={res['hvac_expected_idle']}")
     for e in res["active_events"]:
         print(f"  trigger event: {e['event_name']} [{e['period_type']}] "
