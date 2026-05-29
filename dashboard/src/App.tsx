@@ -6,6 +6,8 @@ import { Login } from './pages/Login'
 import { HomeDetail } from './pages/HomeDetail'
 import { Control } from './pages/Control'
 import { Dr } from './pages/Dr'
+import { Energy } from './pages/Energy'
+import { Reports } from './pages/Reports'
 import { Showcase } from './pages/Showcase'
 import { AppShell } from './components/AppShell'
 import { RequireAuth } from './components/RequireAuth'
@@ -53,6 +55,28 @@ function App() {
                 <AppShell>
                   <HomeDetail />
                 </AppShell>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/homes/:id/energy"
+            element={
+              <RequireAuth>
+                <AppShell>
+                  <Energy />
+                </AppShell>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/reports"
+            element={
+              <RequireAuth>
+                <RequireRole allow={['fleet_analyst', 'admin']}>
+                  <AppShell>
+                    <Reports />
+                  </AppShell>
+                </RequireRole>
               </RequireAuth>
             }
           />

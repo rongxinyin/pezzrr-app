@@ -225,3 +225,45 @@ class OpenAdrPricePoint(BaseModel):
     interval_end: datetime
     period_type: Optional[str] = None
     price_per_kwh: float
+
+
+# =====================================================================
+# Energy analytics + reports (§13.3, §13.7)
+# =====================================================================
+class EnergyDay(BaseModel):
+    date: date
+    home_load_kwh: Optional[float] = None
+    solar_gen_kwh: Optional[float] = None
+    grid_import_kwh: Optional[float] = None
+    grid_export_kwh: Optional[float] = None
+    peak_demand_kw: Optional[float] = None
+    peak_demand_at: Optional[datetime] = None
+    self_consumption_pct: Optional[float] = None
+    estimated_cost_usd: Optional[float] = None
+
+
+class CircuitEnergy(BaseModel):
+    circuit_id: int
+    channel_num: Optional[int] = None
+    circuit_name: Optional[str] = None
+    energy_kwh: Optional[float] = None
+
+
+class EnergyTotals(BaseModel):
+    home_load_kwh: Optional[float] = None
+    solar_gen_kwh: Optional[float] = None
+    grid_import_kwh: Optional[float] = None
+    grid_export_kwh: Optional[float] = None
+    peak_demand_kw: Optional[float] = None
+    self_consumption_pct: Optional[float] = None
+    estimated_cost_usd: Optional[float] = None
+
+
+class EnergyAnalytics(BaseModel):
+    home_id: int
+    home_name: Optional[str] = None
+    start: datetime
+    end: datetime
+    days: list[EnergyDay]
+    circuits: list[CircuitEnergy]
+    totals: EnergyTotals

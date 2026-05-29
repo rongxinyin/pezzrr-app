@@ -58,6 +58,13 @@ export function HomeDetail() {
               Control
             </Link>
           )}
+          <Link
+            to={`/homes/${homeId}/energy`}
+            className="rounded text-[13px] text-accent"
+            style={{ border: '0.5px solid var(--border)', padding: '6px 14px', background: 'var(--bg-card)' }}
+          >
+            Energy
+          </Link>
           <button
             onClick={() => setHistoryOpen(true)}
             className="rounded text-[13px] text-accent"

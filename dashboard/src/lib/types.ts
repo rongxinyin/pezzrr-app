@@ -193,6 +193,48 @@ export interface OpenAdrPricePoint {
   price_per_kwh: number
 }
 
+// =====================================================================
+// Energy analytics (§13.3) — matches api/models.py
+// =====================================================================
+export interface EnergyDay {
+  date: string
+  home_load_kwh: number | null
+  solar_gen_kwh: number | null
+  grid_import_kwh: number | null
+  grid_export_kwh: number | null
+  peak_demand_kw: number | null
+  peak_demand_at: string | null
+  self_consumption_pct: number | null
+  estimated_cost_usd: number | null
+}
+
+export interface CircuitEnergy {
+  circuit_id: number
+  channel_num: number | null
+  circuit_name: string | null
+  energy_kwh: number | null
+}
+
+export interface EnergyTotals {
+  home_load_kwh: number | null
+  solar_gen_kwh: number | null
+  grid_import_kwh: number | null
+  grid_export_kwh: number | null
+  peak_demand_kw: number | null
+  self_consumption_pct: number | null
+  estimated_cost_usd: number | null
+}
+
+export interface EnergyAnalytics {
+  home_id: number
+  home_name: string | null
+  start: string
+  end: string
+  days: EnergyDay[]
+  circuits: CircuitEnergy[]
+  totals: EnergyTotals
+}
+
 export interface FleetStatusItem {
   home_id: number
   home_name: string
