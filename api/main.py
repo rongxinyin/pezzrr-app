@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .control_bus import control_bus
 from .db import CONFIG_DIR, db
-from .routers import auth, homes, live, telemetry
+from .routers import auth, control, homes, live, telemetry
 
 DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
@@ -33,7 +34,9 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
+    await control_bus.connect()
     yield
+    await control_bus.disconnect()
     await db.disconnect()
 
 
@@ -56,6 +59,7 @@ app.include_router(auth.router)
 app.include_router(homes.router)
 app.include_router(telemetry.router)
 app.include_router(live.router)
+app.include_router(control.router)
 
 
 @app.get("/api/v1/health", tags=["health"])

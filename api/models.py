@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -110,3 +110,67 @@ class FleetDailyRow(BaseModel):
     total_estimated_savings_usd: Optional[float] = None
     avg_self_consumption_pct: Optional[float] = None
     avg_battery_soc_eod: Optional[float] = None
+
+
+# =====================================================================
+# Control (dispatch + audit)
+# =====================================================================
+ACTION_TYPES = (
+    "curtail", "release", "augment", "setpoint_adjust", "relay_toggle",
+    "battery_charge_mode", "eps_toggle", "channel_enable", "channel_disable",
+    "precool", "preheat",
+)
+
+
+class DispatchTarget(BaseModel):
+    kind: Literal["circuit", "thermostat", "plug", "demand_limit", "battery_mode"]
+    circuit_id: Optional[int] = None
+    device_id: Optional[int] = None
+
+
+class DispatchRequest(BaseModel):
+    home_id: int
+    action_type: str
+    target: DispatchTarget
+    params: dict = {}
+    event_id: Optional[int] = None
+
+
+class DispatchResponse(BaseModel):
+    action_id: int
+    status: str  # always "pending" on accept
+
+
+class ControlActionRow(BaseModel):
+    action_id: int
+    home_id: int
+    device_id: Optional[int] = None
+    circuit_id: Optional[int] = None
+    event_id: Optional[int] = None
+    ts: datetime
+    action_type: str
+    triggered_by: str
+    status: str  # pending | acknowledged | success | failed
+    success: Optional[bool] = None
+    acknowledged_at: Optional[datetime] = None
+    error_msg: Optional[str] = None
+
+
+class ControlAdvisoryRow(BaseModel):
+    advisory_id: int
+    home_id: int
+    device_id: Optional[int] = None
+    circuit_id: Optional[int] = None
+    event_id: Optional[int] = None
+    ts: datetime
+    controller: str
+    action_type: str
+    triggered_by: str
+    operation_scenario: Optional[str] = None
+    shadow_mode: bool
+    baseline_cool_setpoint_c: Optional[float] = None
+    baseline_heat_setpoint_c: Optional[float] = None
+    recommended_cool_setpoint_c: Optional[float] = None
+    recommended_heat_setpoint_c: Optional[float] = None
+    expected_cost_usd: Optional[float] = None
+    expected_energy_kwh: Optional[float] = None
