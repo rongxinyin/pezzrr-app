@@ -10,7 +10,9 @@ and decides *what the home should be doing* this cycle; the strategy decides
     load_peak_management - a DR / peak-price event is active. MPC homes optimize
                            against the event price; RBC homes widen the band.
     capacity_management  - panel load is near the 60A main-breaker limit
-                           (>= capacity_trigger_pct). All homes widen the band.
+                           (present amperage >= capacity_trigger_pct), OR the
+                           home-load forecast anticipates a breach within the
+                           lookahead window. All homes widen the band.
     resiliency           - grid outage / EPS mode. All homes widen the band hard.
 
 The scenario is either set explicitly (per-home `operation_scenario`, or the
@@ -108,6 +110,40 @@ def _outage(panel):
             or panel.get("eps_mode_active") is True)
 
 
+def _forecast_capacity_signal(home_name, cfg, conn, now_utc, service_v, trip_a, window_h):
+    """Anticipated capacity breach from the 24 h home-load forecast.
+
+    Loads the per-home forecast and checks whether the predicted peak load
+    within the next `window_h` hours converts to >= the forecast trip current.
+    Lets capacity_management fire *before* a breach instead of only once the
+    present amperage is already over the limit. Returns
+    (breach, peak_w, peak_amps, peak_at_iso); degrades to (False, None, None,
+    None) on any failure (model missing, no history, ...) so the supervisor
+    still resolves from present telemetry."""
+    try:
+        from . import load_forecast_data
+    except ImportError:
+        import load_forecast_data
+    try:
+        fc = load_forecast_data.build_forecast(
+            home_name, mpc_cfg=cfg, conn=conn, now_utc=now_utc)
+    except (SystemExit, Exception):
+        return False, None, None, None
+
+    loads = fc.get("home_load_w") or []
+    times = fc.get("target_times") or []
+    if not loads or not service_v:
+        return False, None, None, None
+    dt_s = float(fc.get("dt_s", 900))
+    n = max(1, int(window_h * 3600 / dt_s))
+    window = loads[:n]
+    peak_w = max(window)
+    i = window.index(peak_w)
+    peak_amps = peak_w / service_v
+    breach = peak_amps >= trip_a
+    return breach, peak_w, peak_amps, (times[i] if i < len(times) else None)
+
+
 # =====================================================================
 # Scenario resolution
 # =====================================================================
@@ -147,24 +183,46 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
     outage = _outage(panel)
     resil_event = any(_event_matches(e, [], resil_kw) for e in evs)
     peak_event = any(_event_matches(e, peak_pts, peak_kw) for e in evs)
-    over_capacity = amps is not None and amps >= trip_a
+    over_capacity_now = amps is not None and amps >= trip_a
+
+    # Anticipated breach from the home-load forecast (config-gated).
+    fc_breach = fc_peak_w = fc_peak_amps = fc_when = None
+    fc_trip_a = None
+    if auto.get("capacity_use_forecast", True):
+        fc_trip_a = float(auto.get("capacity_forecast_trigger_pct",
+                                   auto.get("capacity_trigger_pct", 0.80))) * breaker_a
+        fc_window_h = float(auto.get("capacity_forecast_horizon_h", 24))
+        fc_breach, fc_peak_w, fc_peak_amps, fc_when = _forecast_capacity_signal(
+            home_name, cfg, conn, now_utc, service_v, fc_trip_a, fc_window_h)
+
+    over_capacity = over_capacity_now or bool(fc_breach)
 
     signals = {
         "panel_ts": panel["ts"].isoformat() if panel and panel.get("ts") else None,
         "home_load_w": float(panel["home_load_w"]) if panel and panel.get("home_load_w") is not None else None,
         "estimated_amps": round(amps, 2) if amps is not None else None,
         "capacity_trip_a": round(trip_a, 2),
+        "forecast_peak_w": round(fc_peak_w, 1) if fc_peak_w is not None else None,
+        "forecast_peak_amps": round(fc_peak_amps, 2) if fc_peak_amps is not None else None,
+        "forecast_trip_a": round(fc_trip_a, 2) if fc_trip_a is not None else None,
+        "forecast_peak_at": fc_when,
+        "forecast_breach": bool(fc_breach),
         "grid_outage": outage,
         "resiliency_event": resil_event,
         "peak_event": peak_event,
         "n_events_overlapping": len(evs),
     }
 
+    if over_capacity_now:
+        cap_reason = f"home load {signals['estimated_amps']}A >= {signals['capacity_trip_a']}A"
+    else:
+        cap_reason = (f"forecast peak {signals['forecast_peak_amps']}A >= "
+                      f"{signals['forecast_trip_a']}A at {fc_when}")
+
     detections = {
         "resiliency": (outage or resil_event,
                        "grid outage / EPS mode" if outage else "resiliency event active"),
-        "capacity_management": (over_capacity,
-                                f"home load {signals['estimated_amps']}A >= {signals['capacity_trip_a']}A"),
+        "capacity_management": (over_capacity, cap_reason),
         "load_peak_management": (peak_event, "DR / peak-price event active"),
         "normal": (True, "no shed signal"),
     }
