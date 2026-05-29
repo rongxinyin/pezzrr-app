@@ -26,7 +26,7 @@ partitions cleanly: "mpc" is owned by the MPC periodic, "band_widen"/"baseline"
 by the RBC periodic, so each home is handled exactly once per cycle.
 
 Everything is advisory / shadow mode: recommendations are logged to
-control_actions, no device commands are sent.
+control_advisories, no device commands are sent.
 
 Standalone:
     venv/bin/python -m smart_home_ilc.hvac_supervisor --home test_home
@@ -289,12 +289,12 @@ def home_strategy(home_name, cfg):
 # =====================================================================
 def last_logged_scenario(conn, device_id):
     """operation_scenario of the most recent supervisor band-widen/baseline
-    action for this device (controller='rbc'), or None."""
+    advisory for this device (controller='rbc'), or None."""
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT command_payload->>'operation_scenario'
-               FROM control_actions
-               WHERE device_id=%s AND command_payload->>'controller'='rbc'
+            """SELECT operation_scenario
+               FROM control_advisories
+               WHERE device_id=%s AND controller='rbc'
                ORDER BY ts DESC LIMIT 1""",
             (device_id,),
         )

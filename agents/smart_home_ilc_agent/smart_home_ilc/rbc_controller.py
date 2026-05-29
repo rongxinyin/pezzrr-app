@@ -10,7 +10,7 @@ applied (the controller recommends the baseline setpoints unchanged).
 
 Unlike the MPC, the RBC needs no fitted RC model and no forecast/price vector --
 just the current thermostat setpoints and the active OpenADR events. It runs in
-advisory / shadow mode: recommendations are logged to control_actions
+advisory / shadow mode: recommendations are logged to control_advisories
 (action_type=setpoint_adjust, triggered_by=DR_event); no device commands sent.
 
 Trigger criteria and offset come from mpc_config.json -> defaults.rbc.
@@ -208,13 +208,12 @@ def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
 # Advisory write + dedup
 # =====================================================================
 def last_rbc_event_active(conn, device_id):
-    """The event_active flag of the most recent RBC action for this device, or None."""
+    """The event_active flag of the most recent RBC advisory for this device, or None."""
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT command_payload->>'event_active'
-               FROM control_actions
-               WHERE device_id=%s AND triggered_by='DR_event'
-                 AND command_payload->>'control_strategy'='rbc'
+            """SELECT detail->>'event_active'
+               FROM control_advisories
+               WHERE device_id=%s AND controller='rbc'
                ORDER BY ts DESC LIMIT 1""",
             (device_id,),
         )
@@ -225,29 +224,38 @@ def last_rbc_event_active(conn, device_id):
 
 
 def write_rbc_advisory(result: dict, mpc_cfg=None, conn=None):
-    """Log an RBC recommendation to control_actions (shadow mode: no command)."""
+    """Log an RBC recommendation to control_advisories (shadow mode: no command)."""
     mpc_cfg = mpc_cfg or mpc_data._load_json("mpc_config.json")
     rbc_cfg = mpc_cfg["defaults"].get("rbc", {})
-    payload = {"shadow_mode": mpc_cfg["defaults"]["advisory"].get("shadow_mode", True),
-               **result}
+    shadow = mpc_cfg["defaults"]["advisory"].get("shadow_mode", True)
+    payload = {"shadow_mode": shadow, **result}
     own = conn is None
     conn = conn or mpc_data._connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO control_actions
-                       (home_id, device_id, action_type, triggered_by,
-                        command_payload, success)
-                   VALUES (%s, %s, %s, %s, %s, %s)
-                   RETURNING action_id""",
-                (result["home_id"], result["device_id"],
+                """INSERT INTO control_advisories
+                       (home_id, device_id, event_id, controller, action_type,
+                        triggered_by, operation_scenario, scenario_source, shadow_mode,
+                        baseline_cool_setpoint_c, baseline_heat_setpoint_c,
+                        recommended_cool_setpoint_c, recommended_heat_setpoint_c,
+                        detail)
+                   VALUES (%s, %s, %s, 'rbc', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING advisory_id""",
+                (result["home_id"], result["device_id"], result.get("event_id"),
                  rbc_cfg.get("action_type", "setpoint_adjust"),
-                 rbc_cfg.get("triggered_by", "DR_event"),
-                 json.dumps(payload), True),
+                 result.get("triggered_by", rbc_cfg.get("triggered_by", "DR_event")),
+                 result.get("operation_scenario"), result.get("scenario_source"),
+                 shadow,
+                 result.get("baseline_cool_setpoint_c"),
+                 result.get("baseline_heat_setpoint_c"),
+                 result.get("recommended_cool_setpoint_c"),
+                 result.get("recommended_heat_setpoint_c"),
+                 json.dumps(payload)),
             )
-            action_id = cur.fetchone()[0]
+            advisory_id = cur.fetchone()[0]
         conn.commit()
-        return action_id
+        return advisory_id
     finally:
         if own:
             conn.close()
@@ -273,8 +281,8 @@ def main():
         print(f"  trigger event: {e['event_name']} [{e['period_type']}] "
               f"{e['interval_start']} -> {e['interval_end']}")
     if args.write:
-        action_id = write_rbc_advisory(res)
-        print(f"  wrote control_actions action_id={action_id}")
+        advisory_id = write_rbc_advisory(res)
+        print(f"  wrote control_advisories advisory_id={advisory_id}")
 
 
 if __name__ == "__main__":

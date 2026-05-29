@@ -9,7 +9,7 @@ Pulls everything the controller needs onto a single uniform time grid:
     config/utility_rates.json, overlaid by any active openadr_events
   * the home's comfort band, fitted RC model, and equipment spec
 
-and writes the resulting advisory back to control_actions (no device commands).
+and writes the resulting advisory back to control_advisories (no device commands).
 
 Reads config + DB directly (psycopg2) so it can run inside the VOLTTRON agent or
 standalone for testing:
@@ -318,10 +318,11 @@ def build_inputs(home_name, mpc_cfg=None, rates=None, now_utc=None, conn=None):
 # Advisory write
 # =====================================================================
 def write_advisory(inputs: MPCInputs, result: dict, conn=None):
-    """Log the MPC advisory to control_actions (shadow mode: no device command)."""
+    """Log the MPC advisory to control_advisories (shadow mode: no device command)."""
     defaults = _load_json("mpc_config.json")["defaults"]["advisory"]
+    shadow = defaults.get("shadow_mode", True)
     payload = {
-        "shadow_mode": defaults.get("shadow_mode", True),
+        "shadow_mode": shadow,
         "horizon_steps": inputs.horizon_steps,
         "dt_s": inputs.dt_s,
         "start_utc": inputs.start_utc.isoformat(),
@@ -334,19 +335,31 @@ def write_advisory(inputs: MPCInputs, result: dict, conn=None):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO control_actions
-                       (home_id, device_id, action_type, triggered_by,
-                        command_payload, success)
-                   VALUES (%s, %s, %s, %s, %s, %s)
-                   RETURNING action_id""",
+                """INSERT INTO control_advisories
+                       (home_id, device_id, controller, action_type, triggered_by,
+                        operation_scenario, shadow_mode,
+                        recommended_cool_setpoint_c, recommended_heat_setpoint_c,
+                        expected_cost_usd, expected_energy_kwh,
+                        comfort_violation_degc_steps, solver,
+                        horizon_steps, dt_s, detail)
+                   VALUES (%s, %s, 'mpc', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING advisory_id""",
                 (inputs.home_id, inputs.device_id,
                  defaults.get("action_type", "setpoint_adjust"),
                  defaults.get("triggered_by", "ILC_agent"),
-                 json.dumps(payload), True),
+                 result.get("operation_scenario"), shadow,
+                 result.get("immediate_cool_setpoint_c"),
+                 result.get("immediate_heat_setpoint_c"),
+                 result.get("expected_cost_usd"),
+                 result.get("expected_energy_kwh"),
+                 result.get("comfort_violation_degC_steps"),
+                 result.get("solver"),
+                 inputs.horizon_steps, inputs.dt_s,
+                 json.dumps(payload)),
             )
-            action_id = cur.fetchone()[0]
+            advisory_id = cur.fetchone()[0]
         conn.commit()
-        return action_id
+        return advisory_id
     finally:
         if own:
             conn.close()

@@ -155,3 +155,66 @@ CREATE INDEX IF NOT EXISTS idx_ca_device_ts  ON control_actions(device_id, ts DE
 CREATE INDEX IF NOT EXISTS idx_ca_event      ON control_actions(event_id);
 CREATE INDEX IF NOT EXISTS idx_ca_type       ON control_actions(action_type);
 CREATE INDEX IF NOT EXISTS idx_ca_trigger    ON control_actions(triggered_by);
+
+-- -------------------------------------------------------------
+-- TABLE: control_advisories
+-- Shadow-mode recommendation log for the HVAC supervisor (MPC / RBC).
+-- These are setpoint recommendations that were COMPUTED but NOT sent to any
+-- device. Kept separate from control_actions (the audit trail of commands
+-- actually ISSUED) so that: (a) the shadow log does not pollute the real
+-- command history, (b) control_actions.success keeps its meaning -- the
+-- device accepted the command -- and (c) a future real-actuation path can
+-- write control_actions unchanged. The fields the supervisor reports on
+-- (setpoints, scenario, expected cost/energy) are promoted to columns; the
+-- full payload is retained in `detail`.
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS control_advisories (
+    advisory_id             BIGSERIAL           NOT NULL,
+    home_id                 INTEGER             NOT NULL REFERENCES homes(home_id)          ON DELETE CASCADE,
+    device_id               INTEGER             REFERENCES devices(device_id),
+    circuit_id              INTEGER             REFERENCES panel_circuits(circuit_id),  -- NULL for thermostat/whole-home advisories
+    event_id                INTEGER             REFERENCES dr_events(event_id),         -- set for DR-driven RBC advisories
+    ts                      TIMESTAMPTZ         NOT NULL DEFAULT NOW(),                 -- when the advisory was generated
+
+    -- What produced it
+    controller              VARCHAR(8)          NOT NULL CHECK (controller IN ('mpc','rbc')),
+    action_type             action_type_enum    NOT NULL,
+    triggered_by            trigger_source_enum NOT NULL,
+    operation_scenario      VARCHAR(40),                -- normal | load_peak_management | capacity_management | resiliency
+    scenario_source         VARCHAR(16),                -- 'explicit' | 'auto'
+    shadow_mode             BOOLEAN             NOT NULL DEFAULT TRUE,
+
+    -- The recommendation: baseline vs. recommended thermostat setpoints (deg C)
+    baseline_cool_setpoint_c    NUMERIC(5,2),
+    baseline_heat_setpoint_c    NUMERIC(5,2),
+    recommended_cool_setpoint_c NUMERIC(5,2),
+    recommended_heat_setpoint_c NUMERIC(5,2),
+
+    -- MPC expected-outcome estimates (NULL for RBC advisories)
+    expected_cost_usd               NUMERIC(10,4),
+    expected_energy_kwh             NUMERIC(10,4),
+    comfort_violation_degc_steps    NUMERIC(10,4),
+    solver                          VARCHAR(16),
+
+    -- Optimization horizon context
+    horizon_steps           SMALLINT,
+    dt_s                    INTEGER,
+
+    detail                  JSONB,                      -- full advisory payload (prices, forecast linkage, RBC band, etc.)
+    created_at              TIMESTAMPTZ         NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE  control_advisories IS 'Shadow-mode HVAC setpoint recommendations (MPC/RBC) computed but not sent to any device. Separate from control_actions, the issued-command audit trail.';
+COMMENT ON COLUMN control_advisories.shadow_mode IS 'TRUE = recommendation only, no device command issued. Always TRUE while the supervisor runs in advisory mode.';
+COMMENT ON COLUMN control_advisories.detail      IS 'Full advisory payload; the first-class columns above are promoted from this for querying.';
+
+SELECT create_hypertable('control_advisories', 'ts',
+    chunk_time_interval => INTERVAL '30 days', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_cadv_home_ts    ON control_advisories(home_id,   ts DESC);
+CREATE INDEX IF NOT EXISTS idx_cadv_device_ts  ON control_advisories(device_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_cadv_event      ON control_advisories(event_id);
+CREATE INDEX IF NOT EXISTS idx_cadv_controller ON control_advisories(controller);
+CREATE INDEX IF NOT EXISTS idx_cadv_scenario   ON control_advisories(operation_scenario);
+
+SELECT add_retention_policy('control_advisories', INTERVAL '90 days', if_not_exists => TRUE);

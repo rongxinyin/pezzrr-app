@@ -504,7 +504,7 @@ class SmartHomeILCAgent(Agent):
 
     def run_mpc_advisory(self):
         """Compute thermostat MPC setpoint advisories (shadow mode) and log them
-        to control_actions.
+        to control_advisories.
 
         Iterates every configured home, resolves its operation scenario via the
         supervisor, and runs the MPC only for homes whose resolved action is
@@ -513,54 +513,18 @@ class SmartHomeILCAgent(Agent):
 
         Advisory only: nothing is sent to the thermostats. Homes without a
         fitted RC model or recent data are skipped with a warning. The MPC
-        modules talk to the database directly, outside the VOLTTRON bus."""
+        modules talk to the database directly, outside the VOLTTRON bus.
+
+        The cycle body lives in advisory_cycle so the standalone run_advisory
+        loop can drive the same logic without VOLTTRON."""
         try:
             try:
-                from . import mpc_data, mpc_controller, hvac_supervisor
+                from . import advisory_cycle
             except ImportError:
-                import mpc_data
-                import mpc_controller
-                import hvac_supervisor
+                import advisory_cycle
+            advisory_cycle.run_mpc_advisory()
         except Exception as e:
-            _log.warning(f"MPC advisory unavailable (missing dependency?): {e}")
-            return
-
-        try:
-            cfg = mpc_data._load_json("mpc_config.json")
-        except Exception as e:
-            _log.error(f"MPC advisory: could not load mpc_config.json: {e}")
-            return
-
-        conn = mpc_data._connect()
-        try:
-            for home_name in cfg.get("homes", {}):
-                try:
-                    scen = hvac_supervisor.resolve_scenario(home_name, cfg, conn)
-                    strat = hvac_supervisor.home_strategy(home_name, cfg)
-                    if hvac_supervisor.scenario_action(scen["scenario"], strat) != "mpc":
-                        continue  # band_widen/baseline homes -> run_rbc_advisory
-                    inp = mpc_data.build_inputs(home_name, mpc_cfg=cfg, conn=conn)
-                    result = mpc_controller.solve_mpc(inp, mpc_cfg=cfg)
-                    if result.get("status") != "ok":
-                        _log.warning(f"MPC[{home_name}] no solution: "
-                                     f"{result.get('termination')}")
-                        continue
-                    result["operation_scenario"] = scen["scenario"]
-                    action_id = mpc_data.write_advisory(inp, result, conn=conn)
-                    _log.info(
-                        f"MPC advisory[{home_name}] scenario={scen['scenario']} "
-                        f"action_id={action_id} solver={result['solver']} "
-                        f"cool_setpoint={result.get('immediate_cool_setpoint_c')}C "
-                        f"cost=${result['expected_cost_usd']} "
-                        f"energy={result['expected_energy_kwh']}kWh "
-                        f"comfort_viol={result['comfort_violation_degC_steps']}")
-                except SystemExit as e:
-                    # build_inputs raises SystemExit for a missing model/data.
-                    _log.warning(f"MPC[{home_name}] skipped: {e}")
-                except Exception as e:
-                    _log.error(f"MPC[{home_name}] failed: {e}")
-        finally:
-            conn.close()
+            _log.error(f"MPC advisory failed: {e}")
 
     def run_rbc_advisory(self):
         """Scenario-driven band-widening control (shadow mode) for every home
@@ -572,60 +536,18 @@ class SmartHomeILCAgent(Agent):
         offsets so the HVAC coasts to idle; for baseline homes (RBC home in
         normal) it recommends the unchanged setpoints. To keep the audit log
         clean it only writes when the resolved scenario changes for a device,
-        so the periodic can run often without flooding control_actions."""
+        so the periodic can run often without flooding control_advisories.
+
+        The cycle body lives in advisory_cycle so the standalone run_advisory
+        loop can drive the same logic without VOLTTRON."""
         try:
             try:
-                from . import mpc_data, rbc_controller, hvac_supervisor
+                from . import advisory_cycle
             except ImportError:
-                import mpc_data
-                import rbc_controller
-                import hvac_supervisor
+                import advisory_cycle
+            advisory_cycle.run_rbc_advisory()
         except Exception as e:
-            _log.warning(f"RBC advisory unavailable (missing dependency?): {e}")
-            return
-
-        try:
-            cfg = mpc_data._load_json("mpc_config.json")
-        except Exception as e:
-            _log.error(f"RBC advisory: could not load mpc_config.json: {e}")
-            return
-
-        conn = mpc_data._connect()
-        try:
-            for home_name in cfg.get("homes", {}):
-                try:
-                    scen = hvac_supervisor.resolve_scenario(home_name, cfg, conn)
-                    strat = hvac_supervisor.home_strategy(home_name, cfg)
-                    action = hvac_supervisor.scenario_action(scen["scenario"], strat)
-                    if action not in ("band_widen", "baseline"):
-                        continue  # 'mpc' homes -> run_mpc_advisory
-                    cool_off, heat_off = (
-                        hvac_supervisor.scenario_offsets(scen["scenario"], cfg)
-                        if action == "band_widen" else (0.0, 0.0))
-                    res = rbc_controller.relax_setpoints(
-                        home_name, cool_off, heat_off, mpc_cfg=cfg, conn=conn,
-                        scenario=scen["scenario"],
-                        triggered_by=hvac_supervisor.SCENARIO_TRIGGERED_BY.get(
-                            scen["scenario"], "ILC_agent"),
-                        active_events_brief=None)
-                    res["scenario_source"] = scen["source"]
-                    res["scenario_reason"] = scen["reason"]
-                    prev = hvac_supervisor.last_logged_scenario(conn, res["device_id"])
-                    if prev == scen["scenario"]:
-                        continue  # no scenario transition -> nothing new to log
-                    action_id = rbc_controller.write_rbc_advisory(res, mpc_cfg=cfg, conn=conn)
-                    _log.info(
-                        f"RBC advisory[{home_name}] scenario={scen['scenario']} "
-                        f"({scen['source']}) action={action} action_id={action_id} "
-                        f"cool {res['baseline_cool_setpoint_c']}->{res['recommended_cool_setpoint_c']}C "
-                        f"heat {res['baseline_heat_setpoint_c']}->{res['recommended_heat_setpoint_c']}C "
-                        f"idle_expected={res['hvac_expected_idle']}")
-                except SystemExit as e:
-                    _log.warning(f"RBC[{home_name}] skipped: {e}")
-                except Exception as e:
-                    _log.error(f"RBC[{home_name}] failed: {e}")
-        finally:
-            conn.close()
+            _log.error(f"RBC advisory failed: {e}")
 
     # Additional helper methods for specific device types and strategies...
     def maintain_comfort_settings(self):

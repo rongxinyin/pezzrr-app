@@ -14,7 +14,7 @@ even when the initial temperature already sits outside the band).
 
 Output is advisory: the optimized indoor-temperature trajectory is translated
 into a recommended cool/heat setpoint schedule. Nothing is sent to the device;
-write the result to control_actions via mpc_data.write_advisory.
+write the result to control_advisories via mpc_data.write_advisory.
 
 Solver selection:
   * HiGHS via Pyomo's APPSI interface (no executable needed).
