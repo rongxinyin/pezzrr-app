@@ -106,3 +106,56 @@ SELECT create_hypertable('panel_circuit_readings', 'ts',
 CREATE INDEX IF NOT EXISTS idx_pcr_circuit_ts ON panel_circuit_readings(circuit_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_pcr_home_ts    ON panel_circuit_readings(home_id,    ts DESC);
 CREATE INDEX IF NOT EXISTS idx_pcr_device_ts  ON panel_circuit_readings(device_id,  ts DESC);
+
+-- -------------------------------------------------------------
+-- TABLE: home_load_forecast
+-- Whole-home 24h load forecast (one row per horizon step) produced by the
+-- smart_home_ilc supervisor. generated_at = when the forecast was made;
+-- forecast_ts = the step it predicts. Keeping generated_at preserves each
+-- forecast revision (mirrors weather_forecast).
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS home_load_forecast (
+    id              BIGSERIAL       NOT NULL,
+    home_id         INTEGER         NOT NULL REFERENCES homes(home_id) ON DELETE CASCADE,
+    generated_at    TIMESTAMPTZ     NOT NULL,           -- when this forecast was produced
+    forecast_ts     TIMESTAMPTZ     NOT NULL,           -- target step of the prediction
+    load_w          NUMERIC(10,3),                      -- predicted whole-home load (W)
+    temp_source     VARCHAR(32),                        -- 'weather_forecast' | 'flat_fallback'
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    UNIQUE (home_id, generated_at, forecast_ts)
+);
+
+COMMENT ON TABLE home_load_forecast IS 'Whole-home 24h load forecast per horizon step; generated_at preserves forecast revisions.';
+
+SELECT create_hypertable('home_load_forecast', 'forecast_ts',
+    chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_hlf_home_gen ON home_load_forecast(home_id, generated_at DESC);
+
+SELECT add_retention_policy('home_load_forecast', INTERVAL '60 days', if_not_exists => TRUE);
+
+-- -------------------------------------------------------------
+-- TABLE: circuit_load_forecast
+-- Per-circuit 24h load forecast (one row per circuit per horizon step),
+-- reconciled to sum to the home_load_forecast aggregate.
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS circuit_load_forecast (
+    id              BIGSERIAL       NOT NULL,
+    circuit_id      INTEGER         NOT NULL REFERENCES panel_circuits(circuit_id) ON DELETE CASCADE,
+    home_id         INTEGER         NOT NULL REFERENCES homes(home_id)             ON DELETE CASCADE,
+    generated_at    TIMESTAMPTZ     NOT NULL,
+    forecast_ts     TIMESTAMPTZ     NOT NULL,
+    load_w          NUMERIC(10,3),                      -- predicted circuit load (W)
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    UNIQUE (circuit_id, generated_at, forecast_ts)
+);
+
+COMMENT ON TABLE circuit_load_forecast IS 'Per-circuit 24h load forecast per horizon step, reconciled to the home aggregate.';
+
+SELECT create_hypertable('circuit_load_forecast', 'forecast_ts',
+    chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_clf_circuit_gen ON circuit_load_forecast(circuit_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_clf_home_gen    ON circuit_load_forecast(home_id,    generated_at DESC);
+
+SELECT add_retention_policy('circuit_load_forecast', INTERVAL '60 days', if_not_exists => TRUE);

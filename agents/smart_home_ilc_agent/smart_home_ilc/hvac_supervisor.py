@@ -36,6 +36,7 @@ Standalone:
 from __future__ import annotations
 
 import argparse
+import logging
 from datetime import datetime, timezone
 
 import psycopg2.extras
@@ -45,6 +46,8 @@ try:
 except ImportError:  # running as a plain script, not a package module
     import mpc_data
     import rbc_controller
+
+log = logging.getLogger(__name__)
 
 
 # Action a (scenario, strategy) pair resolves to for one home.
@@ -110,26 +113,30 @@ def _outage(panel):
             or panel.get("eps_mode_active") is True)
 
 
-def _forecast_capacity_signal(home_name, cfg, conn, now_utc, service_v, trip_a, window_h):
-    """Anticipated capacity breach from the 24 h home-load forecast.
-
-    Loads the per-home forecast and checks whether the predicted peak load
-    within the next `window_h` hours converts to >= the forecast trip current.
-    Lets capacity_management fire *before* a breach instead of only once the
-    present amperage is already over the limit. Returns
-    (breach, peak_w, peak_amps, peak_at_iso); degrades to (False, None, None,
-    None) on any failure (model missing, no history, ...) so the supervisor
-    still resolves from present telemetry."""
+def _load_forecast_module():
     try:
         from . import load_forecast_data
     except ImportError:
         import load_forecast_data
+    return load_forecast_data
+
+
+def _build_home_forecast(home_name, cfg, conn, now_utc):
+    """Build the 24 h home-load forecast, or None on any failure (model
+    missing, no history, ...) so detection still works from telemetry."""
     try:
-        fc = load_forecast_data.build_forecast(
+        return _load_forecast_module().build_forecast(
             home_name, mpc_cfg=cfg, conn=conn, now_utc=now_utc)
     except (SystemExit, Exception):
-        return False, None, None, None
+        return None
 
+
+def _forecast_capacity_breach(fc, service_v, trip_a, window_h):
+    """Anticipated capacity breach from a forecast dict: does the predicted
+    peak load within the next `window_h` hours convert to >= the forecast trip
+    current? Lets capacity_management fire *before* a breach instead of only
+    once present amperage is already over the limit. Returns
+    (breach, peak_w, peak_amps, peak_at_iso)."""
     loads = fc.get("home_load_w") or []
     times = fc.get("target_times") or []
     if not loads or not service_v:
@@ -140,8 +147,7 @@ def _forecast_capacity_signal(home_name, cfg, conn, now_utc, service_v, trip_a, 
     peak_w = max(window)
     i = window.index(peak_w)
     peak_amps = peak_w / service_v
-    breach = peak_amps >= trip_a
-    return breach, peak_w, peak_amps, (times[i] if i < len(times) else None)
+    return peak_amps >= trip_a, peak_w, peak_amps, (times[i] if i < len(times) else None)
 
 
 # =====================================================================
@@ -185,15 +191,27 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
     peak_event = any(_event_matches(e, peak_pts, peak_kw) for e in evs)
     over_capacity_now = amps is not None and amps >= trip_a
 
-    # Anticipated breach from the home-load forecast (config-gated).
+    # Home-load forecast, built once per cycle, then optionally persisted and/or
+    # used to anticipate a capacity breach (both config-gated).
+    use_fc = auto.get("capacity_use_forecast", True)
+    store_fc = auto.get("store_forecast", True)
     fc_breach = fc_peak_w = fc_peak_amps = fc_when = None
     fc_trip_a = None
-    if auto.get("capacity_use_forecast", True):
+    fc = _build_home_forecast(home_name, cfg, conn, now_utc) if (use_fc or store_fc) else None
+
+    if fc is not None and store_fc:
+        try:
+            _load_forecast_module().store_forecast(conn, fc)
+        except Exception:
+            conn.rollback()  # a failed insert aborts the txn; keep conn usable
+            log.warning("store_forecast failed for %s", home_name, exc_info=True)
+
+    if fc is not None and use_fc:
         fc_trip_a = float(auto.get("capacity_forecast_trigger_pct",
                                    auto.get("capacity_trigger_pct", 0.80))) * breaker_a
         fc_window_h = float(auto.get("capacity_forecast_horizon_h", 24))
-        fc_breach, fc_peak_w, fc_peak_amps, fc_when = _forecast_capacity_signal(
-            home_name, cfg, conn, now_utc, service_v, fc_trip_a, fc_window_h)
+        fc_breach, fc_peak_w, fc_peak_amps, fc_when = _forecast_capacity_breach(
+            fc, service_v, fc_trip_a, fc_window_h)
 
     over_capacity = over_capacity_now or bool(fc_breach)
 

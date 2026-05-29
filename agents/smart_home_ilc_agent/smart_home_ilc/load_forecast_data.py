@@ -175,11 +175,85 @@ def build_forecast(home_name, mpc_cfg=None, conn=None, now_utc=None):
             conn.close()
 
 
+# =====================================================================
+# Persistence
+# =====================================================================
+def _aware_utc(iso):
+    dt = datetime.fromisoformat(iso)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def store_forecast(conn, out):
+    """Persist a build_forecast() result into home_load_forecast +
+    circuit_load_forecast (one row per horizon step).
+
+    Upserts on (home_id|circuit_id, generated_at, forecast_ts) and commits, so
+    re-running for the same generation overwrites rather than duplicates.
+    Returns {'home_rows', 'circuit_rows'}."""
+    home_id = out["home_id"]
+    generated_at = _aware_utc(out["start_utc"])
+    times = [_aware_utc(t) for t in out["target_times"]]
+    temp_src = out.get("temp_source")
+
+    agg_rows = [(home_id, generated_at, ts, float(w), temp_src)
+                for ts, w in zip(times, out["home_load_w"])]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT pc.channel_num, pc.circuit_id
+               FROM panel_circuits pc JOIN devices d ON d.device_id = pc.device_id
+               WHERE d.home_id = %s""",
+            (home_id,),
+        )
+        cid_by_ch = {int(ch): cid for ch, cid in cur.fetchall()}
+
+    circ_rows = []
+    for ch_str, c in out.get("circuits", {}).items():
+        cid = cid_by_ch.get(int(ch_str))
+        if cid is None:
+            continue
+        circ_rows.extend((cid, home_id, generated_at, ts, float(w))
+                         for ts, w in zip(times, c["power_w"]))
+
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO home_load_forecast
+                   (home_id, generated_at, forecast_ts, load_w, temp_source)
+               VALUES %s
+               ON CONFLICT (home_id, generated_at, forecast_ts)
+               DO UPDATE SET load_w = EXCLUDED.load_w,
+                             temp_source = EXCLUDED.temp_source""",
+            agg_rows,
+        )
+        if circ_rows:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO circuit_load_forecast
+                       (circuit_id, home_id, generated_at, forecast_ts, load_w)
+                   VALUES %s
+                   ON CONFLICT (circuit_id, generated_at, forecast_ts)
+                   DO UPDATE SET load_w = EXCLUDED.load_w""",
+                circ_rows,
+            )
+    conn.commit()
+    return {"home_rows": len(agg_rows), "circuit_rows": len(circ_rows)}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the home-load forecast for a home.")
     ap.add_argument("--home", default="test_home")
+    ap.add_argument("--store", action="store_true",
+                    help="Persist the forecast to home_load_forecast + circuit_load_forecast.")
     args = ap.parse_args()
-    out = build_forecast(args.home)
+    conn = mpc_data._connect()
+    try:
+        out = build_forecast(args.home, conn=conn)
+        if args.store:
+            n = store_forecast(conn, out)
+            print(f"  stored: {n['home_rows']} home rows, {n['circuit_rows']} circuit rows")
+    finally:
+        conn.close()
     print(f"[{out['home']}] start={out['start_utc']} temp_src={out['temp_source']} "
           f"steps={len(out['home_load_w'])}")
     print(f"  peak_load_w={out['peak_load_w']}  "
