@@ -111,10 +111,9 @@ def relax_setpoints(home_name, cool_offset_f, heat_offset_f, mpc_cfg=None,
         device_id = hc["device_id"]
         state = mpc_data.latest_indoor_state(conn, device_id)
 
-        # Baseline setpoints: the thermostat's current setpoints, falling back to
-        # the configured comfort edges when a setpoint isn't reported.
-        base_cool = state.get("cool_setpoint_c")
-        base_heat = state.get("heat_setpoint_c")
+        # Baseline setpoints: the configured comfort baseline (defaults.baseline_setpoints,
+        # per-home override), falling back to the configured comfort edges.
+        base_cool, base_heat = mpc_data.baseline_setpoints_c(mpc_cfg, home_name)
         if base_cool is None:
             base_cool = comfort.get("cool_max_c")
         if base_heat is None:

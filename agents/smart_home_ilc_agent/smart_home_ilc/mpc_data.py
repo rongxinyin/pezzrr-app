@@ -85,6 +85,22 @@ class MPCInputs:
 
 
 # =====================================================================
+# Config helpers
+# =====================================================================
+def baseline_setpoints_c(mpc_cfg, home_name):
+    """(cool_c, heat_c) comfort baseline for a home from defaults.baseline_setpoints,
+    overridden by a per-home baseline_setpoints block. Stored in degrees F in
+    config; converted to Celsius here. Either value may be None if unconfigured."""
+    base = dict(mpc_cfg.get("defaults", {}).get("baseline_setpoints", {}))
+    base.update(mpc_cfg.get("homes", {}).get(home_name, {}).get("baseline_setpoints", {}))
+
+    def f_to_c(f):
+        return round((float(f) - 32.0) * 5.0 / 9.0, 2) if f is not None else None
+
+    return f_to_c(base.get("cool_setpoint_f")), f_to_c(base.get("heat_setpoint_f"))
+
+
+# =====================================================================
 # DB reads
 # =====================================================================
 def get_home_id(conn, home_name):
@@ -319,8 +335,10 @@ def build_inputs(home_name, mpc_cfg=None, rates=None, now_utc=None, conn=None):
 # =====================================================================
 def write_advisory(inputs: MPCInputs, result: dict, conn=None):
     """Log the MPC advisory to control_advisories (shadow mode: no device command)."""
-    defaults = _load_json("mpc_config.json")["defaults"]["advisory"]
+    cfg = _load_json("mpc_config.json")
+    defaults = cfg["defaults"]["advisory"]
     shadow = defaults.get("shadow_mode", True)
+    base_cool, base_heat = baseline_setpoints_c(cfg, inputs.home_name)
     payload = {
         "shadow_mode": shadow,
         "horizon_steps": inputs.horizon_steps,
@@ -338,16 +356,18 @@ def write_advisory(inputs: MPCInputs, result: dict, conn=None):
                 """INSERT INTO control_advisories
                        (home_id, device_id, controller, action_type, triggered_by,
                         operation_scenario, shadow_mode,
+                        baseline_cool_setpoint_c, baseline_heat_setpoint_c,
                         recommended_cool_setpoint_c, recommended_heat_setpoint_c,
                         expected_cost_usd, expected_energy_kwh,
                         comfort_violation_degc_steps, solver,
                         horizon_steps, dt_s, detail)
-                   VALUES (%s, %s, 'mpc', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, 'mpc', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING advisory_id""",
                 (inputs.home_id, inputs.device_id,
                  defaults.get("action_type", "setpoint_adjust"),
                  defaults.get("triggered_by", "ILC_agent"),
                  result.get("operation_scenario"), shadow,
+                 base_cool, base_heat,
                  result.get("immediate_cool_setpoint_c"),
                  result.get("immediate_heat_setpoint_c"),
                  result.get("expected_cost_usd"),
