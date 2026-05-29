@@ -142,6 +142,57 @@ export interface DispatchResponse {
   status: string
 }
 
+// =====================================================================
+// Demand response (§13.4) — matches api/models.py
+// =====================================================================
+export interface DrEvent {
+  event_id: number
+  event_reference: string | null
+  ven_id: string | null
+  vtn_id: string | null
+  signal_name: string | null
+  signal_type: string | null
+  signal_level: number | null
+  target_load_kw: number | null
+  event_start: string
+  event_end: string
+  status: string
+  priority: number | null
+  test_event: boolean
+  active: boolean
+  participant_count: number
+}
+
+export interface DrParticipant {
+  id: number
+  event_id: number
+  home_id: number
+  home_name: string | null
+  opted_in: boolean
+  baseline_kw: number | null
+  actual_reduction_kw: number | null
+  reduction_target_kw: number | null
+  settlement_kwh: number | null
+  performance_score: number | null
+  notes: string | null
+}
+
+export interface OpenAdrPrice {
+  ts: string | null
+  program_name: string | null
+  period_type: string | null
+  price_per_kwh: number | null
+  interval_start: string | null
+  interval_end: string | null
+}
+
+export interface OpenAdrPricePoint {
+  interval_start: string
+  interval_end: string
+  period_type: string | null
+  price_per_kwh: number
+}
+
 export interface FleetStatusItem {
   home_id: number
   home_name: string

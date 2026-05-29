@@ -13,7 +13,7 @@ interface NavItem {
 // built yet render as disabled placeholders so the layout is final now.
 const NAV: NavItem[] = [
   { label: 'Fleet', to: '/', enabled: true },
-  { label: 'Demand response', to: '/dr', enabled: false },
+  { label: 'Demand response', to: '/dr', enabled: true },
   { label: 'Health', to: '/health', enabled: false },
   { label: 'Reports', to: '/reports', enabled: false, roles: ['fleet_analyst', 'admin'] },
   { label: 'Admin', to: '/admin', enabled: false, roles: ['admin'] },

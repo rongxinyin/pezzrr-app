@@ -5,6 +5,7 @@ import { Fleet } from './pages/Fleet'
 import { Login } from './pages/Login'
 import { HomeDetail } from './pages/HomeDetail'
 import { Control } from './pages/Control'
+import { Dr } from './pages/Dr'
 import { Showcase } from './pages/Showcase'
 import { AppShell } from './components/AppShell'
 import { RequireAuth } from './components/RequireAuth'
@@ -31,6 +32,16 @@ function App() {
               <RequireAuth>
                 <AppShell>
                   <Fleet />
+                </AppShell>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/dr"
+            element={
+              <RequireAuth>
+                <AppShell>
+                  <Dr />
                 </AppShell>
               </RequireAuth>
             }

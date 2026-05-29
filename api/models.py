@@ -174,3 +174,54 @@ class ControlAdvisoryRow(BaseModel):
     recommended_heat_setpoint_c: Optional[float] = None
     expected_cost_usd: Optional[float] = None
     expected_energy_kwh: Optional[float] = None
+
+
+# =====================================================================
+# Demand response (§13.4)
+# =====================================================================
+class DrEventRow(BaseModel):
+    event_id: int
+    event_reference: Optional[str] = None
+    ven_id: Optional[str] = None
+    vtn_id: Optional[str] = None
+    signal_name: Optional[str] = None
+    signal_type: Optional[str] = None
+    signal_level: Optional[float] = None
+    target_load_kw: Optional[float] = None
+    event_start: datetime
+    event_end: datetime
+    status: str
+    priority: Optional[int] = None
+    test_event: bool
+    active: bool
+    participant_count: int
+
+
+class DrParticipantRow(BaseModel):
+    id: int
+    event_id: int
+    home_id: int
+    home_name: Optional[str] = None
+    opted_in: bool
+    baseline_kw: Optional[float] = None
+    actual_reduction_kw: Optional[float] = None
+    reduction_target_kw: Optional[float] = None
+    settlement_kwh: Optional[float] = None
+    performance_score: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class OpenAdrPrice(BaseModel):
+    ts: Optional[datetime] = None
+    program_name: Optional[str] = None
+    period_type: Optional[str] = None
+    price_per_kwh: Optional[float] = None
+    interval_start: Optional[datetime] = None
+    interval_end: Optional[datetime] = None
+
+
+class OpenAdrPricePoint(BaseModel):
+    interval_start: datetime
+    interval_end: datetime
+    period_type: Optional[str] = None
+    price_per_kwh: float
