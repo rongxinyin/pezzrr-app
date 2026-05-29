@@ -9,6 +9,7 @@ import { CircuitBars } from '../components/CircuitBars'
 import { HistoryDrawer } from '../components/HistoryDrawer'
 import { useHomeStream } from '../hooks/useHomeStream'
 import { apiFetch } from '../lib/api'
+import { useAuthStore } from '../store/auth'
 import type { Status } from '../components/status'
 
 function kw(w: number | null | undefined): string {
@@ -29,6 +30,8 @@ function socStatus(soc: number | null | undefined): Status {
 export function HomeDetail() {
   const { id } = useParams()
   const homeId = Number(id)
+  const role = useAuthStore((s) => s.role)
+  const canControl = role === 'operator' || role === 'admin'
   const [historyOpen, setHistoryOpen] = useState(false)
   const { data, isLoading, error } = useHomeStream(homeId)
   const { data: home } = useQuery({
@@ -45,13 +48,24 @@ export function HomeDetail() {
       </Link>
       <div className="mb-4 mt-2 flex items-center justify-between">
         <h1 className="text-[22px] font-medium text-text">{title}</h1>
-        <button
-          onClick={() => setHistoryOpen(true)}
-          className="rounded text-[13px] text-accent"
-          style={{ border: '0.5px solid var(--border)', padding: '6px 14px', background: 'var(--bg-card)' }}
-        >
-          24h history
-        </button>
+        <div className="flex items-center gap-2">
+          {canControl && (
+            <Link
+              to={`/control/${homeId}`}
+              className="rounded text-[13px] font-medium"
+              style={{ padding: '6px 14px', color: 'var(--bg-card)', background: 'var(--accent)' }}
+            >
+              Control
+            </Link>
+          )}
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="rounded text-[13px] text-accent"
+            style={{ border: '0.5px solid var(--border)', padding: '6px 14px', background: 'var(--bg-card)' }}
+          >
+            24h history
+          </button>
+        </div>
       </div>
 
       <HistoryDrawer

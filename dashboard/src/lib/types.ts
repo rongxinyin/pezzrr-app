@@ -87,6 +87,61 @@ export interface PanelEnvelope {
   points: PanelPoint[]
 }
 
+// =====================================================================
+// Control (dispatch + audit) — matches api/models.py
+// =====================================================================
+export type ActionStatus = 'pending' | 'acknowledged' | 'success' | 'failed'
+
+export interface ControlAction {
+  action_id: number
+  home_id: number
+  device_id: number | null
+  circuit_id: number | null
+  event_id: number | null
+  ts: string
+  action_type: string
+  triggered_by: string
+  status: ActionStatus
+  success: boolean | null
+  acknowledged_at: string | null
+  error_msg: string | null
+}
+
+export interface ControlAdvisory {
+  advisory_id: number
+  home_id: number
+  device_id: number | null
+  circuit_id: number | null
+  event_id: number | null
+  ts: string
+  controller: string
+  action_type: string
+  triggered_by: string
+  operation_scenario: string | null
+  shadow_mode: boolean
+  baseline_cool_setpoint_c: number | null
+  baseline_heat_setpoint_c: number | null
+  recommended_cool_setpoint_c: number | null
+  recommended_heat_setpoint_c: number | null
+  expected_cost_usd: number | null
+  expected_energy_kwh: number | null
+}
+
+export type DispatchKind = 'circuit' | 'thermostat' | 'plug' | 'demand_limit' | 'battery_mode'
+
+export interface DispatchRequest {
+  home_id: number
+  action_type: string
+  target: { kind: DispatchKind; circuit_id?: number | null; device_id?: number | null }
+  params?: Record<string, unknown>
+  event_id?: number | null
+}
+
+export interface DispatchResponse {
+  action_id: number
+  status: string
+}
+
 export interface FleetStatusItem {
   home_id: number
   home_name: string

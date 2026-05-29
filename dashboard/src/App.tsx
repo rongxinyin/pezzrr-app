@@ -4,9 +4,11 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Fleet } from './pages/Fleet'
 import { Login } from './pages/Login'
 import { HomeDetail } from './pages/HomeDetail'
+import { Control } from './pages/Control'
 import { Showcase } from './pages/Showcase'
 import { AppShell } from './components/AppShell'
 import { RequireAuth } from './components/RequireAuth'
+import { RequireRole } from './components/RequireRole'
 import { useUIStore } from './store/ui'
 
 const queryClient = new QueryClient()
@@ -40,6 +42,18 @@ function App() {
                 <AppShell>
                   <HomeDetail />
                 </AppShell>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/control/:id"
+            element={
+              <RequireAuth>
+                <RequireRole allow={['operator', 'admin']}>
+                  <AppShell>
+                    <Control />
+                  </AppShell>
+                </RequireRole>
               </RequireAuth>
             }
           />
