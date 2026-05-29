@@ -23,3 +23,6 @@ __pycache__/
 
 config/*
 data_collectors/collector.log
+# Ignore generated diagnostic plot outputs
+tests/*.png
+tests/*_stats.csv
