@@ -1,0 +1,36 @@
+:root {
+  /* surfaces */
+  --bg-page:    #F6F7F8;
+  --bg-card:    #FFFFFF;
+  --bg-subtle:  #F0F2F3;
+  --border:     rgba(20, 30, 40, 0.10);
+  /* text */
+  --text:       #1B2733;
+  --text-muted: #5B6B7A;
+  --text-faint: #8A98A6;
+  /* accent (teal) */
+  --accent:      #0F6E56;
+  --accent-soft: #E1F5EE;
+  /* status */
+  --ok:    #2E9E6B;  --ok-bg:    #E7F5EE;
+  --watch: #C9821B;  --watch-bg: #FBF0DC;
+  --act:   #C4453B;  --act-bg:   #FBEAE9;
+  --info:  #1E6FA8;  --info-bg:  #E6F1FB;
+  /* shape */
+  --radius:    12px;
+  --radius-lg: 16px;
+  --shadow:    0 1px 2px rgba(20, 30, 40, 0.06);
+}
+
+/* Dark palette shared by OS preference and explicit toggle. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg-page: #0F1417; --bg-card: #161C21; --bg-subtle: #1C242A;
+    --text: #E7ECEF; --text-muted: #9DAAB4; --border: rgba(255, 255, 255, 0.10);
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg-page: #0F1417; --bg-card: #161C21; --bg-subtle: #1C242A;
+  --text: #E7ECEF; --text-muted: #9DAAB4; --border: rgba(255, 255, 255, 0.10);
+}

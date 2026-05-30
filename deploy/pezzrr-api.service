@@ -1,0 +1,21 @@
+[Unit]
+Description=Pezzrr Dashboard API (FastAPI/uvicorn)
+Documentation=file:///home/ryin/github/pezzrr-app/docs/DASHBOARD_DESIGN.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryin
+Group=ryin
+WorkingDirectory=/home/ryin/github/pezzrr-app
+# Single worker: the control_bus MQTT result listener must run in one process
+# so dispatch results are not handled by multiple workers. Scale via a shared
+# broker subscription before raising this.
+ExecStart=/home/ryin/github/pezzrr-app/venv/bin/python3 -m uvicorn api.main:app --host 127.0.0.1 --port 8077 --workers 1
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
