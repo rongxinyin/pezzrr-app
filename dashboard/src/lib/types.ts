@@ -235,6 +235,53 @@ export interface EnergyAnalytics {
   totals: EnergyTotals
 }
 
+// =====================================================================
+// Device health (§13.6) — matches api/models.py
+// =====================================================================
+export interface DeviceHealth {
+  device_id: number
+  home_id: number
+  home_name: string | null
+  device_type: string
+  device_name: string | null
+  manufacturer: string | null
+  model: string | null
+  firmware_version: string | null
+  is_online: boolean | null
+  online_updated_at: string | null
+  is_active: boolean
+}
+
+export interface CoverageRow {
+  device_id: number
+  device_type: string
+  device_name: string | null
+  reading_count: number
+  present_buckets: number
+  expected_buckets: number
+  coverage_pct: number | null
+  last_reading_at: string | null
+}
+
+export interface CoverageReport {
+  home_id: number
+  home_name: string | null
+  date: string
+  devices: CoverageRow[]
+}
+
+// =====================================================================
+// Admin — user management (§13.8) — matches api/models.py
+// =====================================================================
+export interface AdminUser {
+  user_id: number
+  username: string
+  role: string
+  is_active: boolean
+  created_at: string | null
+  homes: number[]
+}
+
 export interface FleetStatusItem {
   home_id: number
   home_name: string

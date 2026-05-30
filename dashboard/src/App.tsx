@@ -8,6 +8,8 @@ import { Control } from './pages/Control'
 import { Dr } from './pages/Dr'
 import { Energy } from './pages/Energy'
 import { Reports } from './pages/Reports'
+import { Health } from './pages/Health'
+import { Admin } from './pages/Admin'
 import { Showcase } from './pages/Showcase'
 import { AppShell } from './components/AppShell'
 import { RequireAuth } from './components/RequireAuth'
@@ -75,6 +77,28 @@ function App() {
                 <RequireRole allow={['fleet_analyst', 'admin']}>
                   <AppShell>
                     <Reports />
+                  </AppShell>
+                </RequireRole>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/health"
+            element={
+              <RequireAuth>
+                <AppShell>
+                  <Health />
+                </AppShell>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <RequireAuth>
+                <RequireRole allow={['admin']}>
+                  <AppShell>
+                    <Admin />
                   </AppShell>
                 </RequireRole>
               </RequireAuth>

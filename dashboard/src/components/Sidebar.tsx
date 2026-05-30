@@ -15,9 +15,9 @@ interface NavItem {
 const NAV: NavItem[] = [
   { label: 'Fleet', to: '/', enabled: true },
   { label: 'Demand response', to: '/dr', enabled: true, group: 'Operation' },
-  { label: 'Health', to: '/health', enabled: false },
+  { label: 'Health', to: '/health', enabled: true },
   { label: 'Reports', to: '/reports', enabled: true, roles: ['fleet_analyst', 'admin'] },
-  { label: 'Admin', to: '/admin', enabled: false, roles: ['admin'] },
+  { label: 'Admin', to: '/admin', enabled: true, roles: ['admin'] },
 ]
 
 function NavRow({ item }: { item: NavItem }) {

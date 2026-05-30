@@ -5,6 +5,7 @@ interface ConfirmDialogProps {
   title: string
   body: ReactNode
   confirmLabel?: string
+  busyLabel?: string
   danger?: boolean
   busy?: boolean
   onConfirm: () => void
@@ -18,6 +19,7 @@ export function ConfirmDialog({
   title,
   body,
   confirmLabel = 'Confirm',
+  busyLabel = 'Dispatching…',
   danger = false,
   busy = false,
   onConfirm,
@@ -57,7 +59,7 @@ export function ConfirmDialog({
               opacity: busy ? 0.6 : 1,
             }}
           >
-            {busy ? 'Dispatching…' : confirmLabel}
+            {busy ? busyLabel : confirmLabel}
           </button>
         </div>
       </div>

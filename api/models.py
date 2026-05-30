@@ -267,3 +267,65 @@ class EnergyAnalytics(BaseModel):
     days: list[EnergyDay]
     circuits: list[CircuitEnergy]
     totals: EnergyTotals
+
+
+# =====================================================================
+# Health (§13.6)
+# =====================================================================
+class DeviceHealth(BaseModel):
+    device_id: int
+    home_id: int
+    home_name: Optional[str] = None
+    device_type: str
+    device_name: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    firmware_version: Optional[str] = None
+    is_online: Optional[bool] = None
+    online_updated_at: Optional[datetime] = None
+    is_active: bool = True
+
+
+class CoverageRow(BaseModel):
+    device_id: int
+    device_type: str
+    device_name: Optional[str] = None
+    reading_count: int = 0
+    present_buckets: int = 0
+    expected_buckets: int = 0
+    coverage_pct: Optional[float] = None
+    last_reading_at: Optional[datetime] = None
+
+
+class CoverageReport(BaseModel):
+    home_id: int
+    home_name: Optional[str] = None
+    date: str
+    devices: list[CoverageRow]
+
+
+# =====================================================================
+# Admin — user management (§13.8)
+# =====================================================================
+class AdminUser(BaseModel):
+    user_id: int
+    username: str
+    role: str
+    is_active: bool
+    created_at: Optional[datetime] = None
+    homes: list[int] = []
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str
+    is_active: bool = True
+    homes: list[int] = []
+
+
+class UpdateUserRequest(BaseModel):
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+    homes: Optional[list[int]] = None
