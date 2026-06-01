@@ -32,6 +32,14 @@ def _modules():
     return mpc_data, mpc_controller, rbc_controller, hvac_supervisor
 
 
+def _scenario_plan_module():
+    try:
+        from . import scenario_plan
+    except ImportError:
+        import scenario_plan
+    return scenario_plan
+
+
 def run_mpc_advisory(cfg=None, conn=None):
     """Compute thermostat MPC setpoint advisories (shadow mode) and log them to
     control_actions.
@@ -131,6 +139,52 @@ def run_rbc_advisory(cfg=None, conn=None):
                 log.warning(f"RBC[{home_name}] skipped: {e}")
             except Exception as e:
                 log.error(f"RBC[{home_name}] failed: {e}")
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def run_scenario_advisory(cfg=None, conn=None):
+    """Full-home scenario sequences (shadow mode) for every configured home.
+
+    For each home this resolves the operation scenario (shared with the HVAC
+    layer) and builds the ordered circuit / battery / plug operation sequence via
+    scenario_plan, logging it to control_advisories (controller='ilc'). The HVAC
+    setpoint advisory itself is still written by run_mpc_advisory/run_rbc_advisory;
+    this layer adds the panel/battery/plug actions around it.
+
+    Like the RBC layer it dedups on scenario transition per panel, so the
+    periodic can run often without flooding control_advisories. Opens its own
+    config/conn when not supplied."""
+    mpc_data, _mpc, _rbc, _sup = _modules()
+    scenario_plan = _scenario_plan_module()
+    own_conn = conn is None
+    if cfg is None:
+        cfg = mpc_data._load_json("mpc_config.json")
+    conn = conn or mpc_data._connect()
+    try:
+        for home_name in cfg.get("homes", {}):
+            try:
+                plan = scenario_plan.build_plan(home_name, cfg=cfg, conn=conn)
+                pdev = plan["panel_device_id"]
+                if pdev is None:
+                    log.warning(f"ILC[{home_name}] no smart_panel device; skipped")
+                    continue
+                prev = scenario_plan.last_logged_ilc_scenario(conn, pdev)
+                if prev == plan["operation_scenario"]:
+                    continue  # no scenario transition -> nothing new to log
+                summary_id = scenario_plan.write_plan_advisory(plan, cfg=cfg, conn=conn)
+                l = plan["load"]
+                log.info(
+                    f"ILC plan[{home_name}] scenario={plan['operation_scenario']} "
+                    f"({plan['scenario_source']}) advisory_id={summary_id} "
+                    f"shed={len(plan['shed_circuits'])} circuits "
+                    f"islanding={l['islanding']} retained={l['retained_load_w']}W "
+                    f"feasible={l['battery_feasible']}")
+            except SystemExit as e:
+                log.warning(f"ILC[{home_name}] skipped: {e}")
+            except Exception as e:
+                log.error(f"ILC[{home_name}] failed: {e}")
     finally:
         if own_conn:
             conn.close()

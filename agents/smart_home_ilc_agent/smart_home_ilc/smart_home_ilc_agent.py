@@ -163,6 +163,7 @@ class SmartHomeILCAgent(Agent):
         self.core.periodic(3600)(self.update_forecasts)  # Every hour
         self.core.periodic(900)(self.run_mpc_advisory)  # MPC advisory, every 15 min (matches dt)
         self.core.periodic(300)(self.run_rbc_advisory)  # Rule-based DR/outage control, every 5 min
+        self.core.periodic(300)(self.run_scenario_advisory)  # Full-home scenario sequences, every 5 min
 
     def handle_ecobee_data(self, peer, sender, bus, topic, headers, message):
         """Handle Ecobee thermostat data"""
@@ -548,6 +549,24 @@ class SmartHomeILCAgent(Agent):
             advisory_cycle.run_rbc_advisory()
         except Exception as e:
             _log.error(f"RBC advisory failed: {e}")
+
+    def run_scenario_advisory(self):
+        """Build + log the full-home operation sequence (circuits + battery +
+        plug + thermostat) for every home, in shadow mode.
+
+        Resolves the same operation scenario as the HVAC advisories and composes
+        the panel/battery/plug actions around the thermostat action, writing the
+        ordered sequence to control_advisories (controller='ilc'). No device
+        commands are sent. The cycle body lives in advisory_cycle so the
+        standalone run_advisory loop can drive the same logic without VOLTTRON."""
+        try:
+            try:
+                from . import advisory_cycle
+            except ImportError:
+                import advisory_cycle
+            advisory_cycle.run_scenario_advisory()
+        except Exception as e:
+            _log.error(f"Scenario advisory failed: {e}")
 
     # Additional helper methods for specific device types and strategies...
     def maintain_comfort_settings(self):

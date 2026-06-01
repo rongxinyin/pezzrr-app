@@ -3,14 +3,17 @@ Standalone advisory loop -- runs the smart-home ILC advisory cycle beside the
 data collector, without a VOLTTRON platform.
 
 Each tick resolves every configured home's operation scenario (which also
-persists the 24 h load forecast), and writes MPC / RBC thermostat setpoint
-*advisories* to control_advisories. Shadow mode only: no commands are ever sent
-to any device. This drives the same advisory_cycle code the VOLTTRON agent uses; it
-just supplies the scheduling the platform would otherwise provide.
+persists the 24 h load forecast), writes MPC / RBC thermostat setpoint
+*advisories*, and builds the full-home operation sequence (panel circuits +
+battery source + smart plug) via scenario_plan. Shadow mode only: no commands
+are ever sent to any device. This drives the same advisory_cycle code the
+VOLTTRON agent uses; it just supplies the scheduling the platform would
+otherwise provide.
 
 RBC and MPC keep the agent's two cadences (RBC every 300 s to catch DR/outage
-events quickly; MPC every 900 s, matching the control dt). RBC runs first each
-tick so MPC sees an up-to-date scenario.
+events quickly; MPC every 900 s, matching the control dt). The full-home
+scenario plan runs on the RBC cadence, right after RBC, so MPC then sees an
+up-to-date scenario.
 
 Usage (from the agent dir, beside the collector):
     ../../venv/bin/python3 -m smart_home_ilc.run_advisory                 # loop
@@ -37,11 +40,12 @@ log = logging.getLogger("smart_home_ilc.run_advisory")
 
 
 def run_once():
-    """Run RBC then MPC once, sharing a single DB connection."""
+    """Run RBC, the full-home scenario plan, then MPC once, sharing a connection."""
     cfg = mpc_data._load_json("mpc_config.json")
     conn = mpc_data._connect()
     try:
         advisory_cycle.run_rbc_advisory(cfg, conn)
+        advisory_cycle.run_scenario_advisory(cfg, conn)
         advisory_cycle.run_mpc_advisory(cfg, conn)
     finally:
         conn.close()
@@ -60,6 +64,7 @@ def loop(rbc_interval, mpc_interval):
             try:
                 if now >= next_rbc:
                     advisory_cycle.run_rbc_advisory(cfg, conn)
+                    advisory_cycle.run_scenario_advisory(cfg, conn)
                     next_rbc = now + rbc_interval
                 if now >= next_mpc:
                     advisory_cycle.run_mpc_advisory(cfg, conn)

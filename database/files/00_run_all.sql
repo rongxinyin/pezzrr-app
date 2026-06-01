@@ -31,8 +31,11 @@
 \echo '=== [7/8] Aggregation & Reporting tables ==='
 \i 07_aggregations.sql
 
-\echo '=== [8/8] Weather (Dark Sky) tables ==='
+\echo '=== [8/9] Weather (Dark Sky) tables ==='
 \i 08_weather.sql
+
+\echo '=== [9/9] Circuit priority tiers (ILC scenario controller) ==='
+\i 09_circuit_priority.sql
 
 \echo '=== Schema creation complete ==='
 
