@@ -14,29 +14,27 @@ export function CircuitBars({ circuits }: { circuits: CircuitLive[] }) {
         const pct = Math.round((w / max) * 100)
         const off = c.is_enabled === false
         return (
-          <div key={c.circuit_id} className="flex items-center gap-3">
-            <div className="w-40 shrink-0 truncate text-[13px] text-text" title={c.circuit_name ?? undefined}>
+          <div key={c.circuit_id} className="flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-[13px] text-text">
               {c.circuit_priority && (
                 <span
-                  className="mr-1 text-[11px]"
+                  className="shrink-0 text-[11px]"
                   style={{ color: STATUS_COLORS[PRIORITY_STATUS[c.circuit_priority]].fg }}
                   title={`${PRIORITY_LABEL[c.circuit_priority]} circuit`}
                 >
                   ●
                 </span>
               )}
-              {c.circuit_name ?? `Channel ${c.channel_num}`}
+              <span className="min-w-0 flex-1">{c.circuit_name ?? `Channel ${c.channel_num}`}</span>
+              {off && <Badge status="offline">off</Badge>}
+              <span className="shrink-0 text-text-muted tabular-nums">{w} W</span>
             </div>
-            <div className="relative h-4 flex-1 overflow-hidden rounded bg-subtle">
+            <div className="relative h-4 overflow-hidden rounded bg-subtle">
               <div
                 className="h-full rounded"
                 style={{ width: `${pct}%`, background: off ? 'var(--text-faint)' : 'var(--accent)' }}
               />
             </div>
-            <div className="w-16 shrink-0 text-right text-[13px] text-text-muted tabular-nums">
-              {w} W
-            </div>
-            {off && <Badge status="offline">off</Badge>}
           </div>
         )
       })}
