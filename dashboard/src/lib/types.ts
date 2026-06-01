@@ -45,6 +45,7 @@ export interface CircuitLive {
   circuit_name: string | null
   is_critical: boolean
   is_controllable: boolean
+  circuit_priority: 'critical' | 'essential' | 'non_essential' | null
   power_w: number | null
   is_enabled: boolean | null
   ts: string | null

@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card } from '../components/Card'
 import { Badge } from '../components/Badge'
+import { PRIORITY_LABEL, PRIORITY_STATUS } from '../components/status'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AdvisoryCard } from '../components/AdvisoryCard'
 import { ActionLog } from '../components/ActionLog'
@@ -167,7 +168,11 @@ function CircuitRow({
       <div className="min-w-0">
         <div className="truncate text-[14px] text-text">
           {name}
-          {c.is_critical && <span className="ml-2 align-middle"><Badge status="act">critical</Badge></span>}
+          {c.circuit_priority && (
+            <span className="ml-2 align-middle">
+              <Badge status={PRIORITY_STATUS[c.circuit_priority]}>{PRIORITY_LABEL[c.circuit_priority]}</Badge>
+            </span>
+          )}
         </div>
         <div className="text-[12px] text-text-faint tabular-nums">{c.power_w ?? 0} W{off && ' · off'}</div>
       </div>

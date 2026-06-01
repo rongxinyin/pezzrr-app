@@ -8,3 +8,20 @@ export const STATUS_COLORS: Record<Status, { fg: string; bg: string }> = {
   info: { fg: 'var(--info)', bg: 'var(--info-bg)' },
   offline: { fg: 'var(--text-faint)', bg: 'var(--bg-subtle)' },
 }
+
+export type CircuitPriority = 'critical' | 'essential' | 'non_essential'
+
+// Circuit shed-priority tiers map onto the status palette: critical (never
+// shed) = act/red, essential (nice-to-have) = watch/amber, non-essential
+// (shed first) = ok/green.
+export const PRIORITY_STATUS: Record<CircuitPriority, Status> = {
+  critical: 'act',
+  essential: 'watch',
+  non_essential: 'ok',
+}
+
+export const PRIORITY_LABEL: Record<CircuitPriority, string> = {
+  critical: 'critical',
+  essential: 'essential',
+  non_essential: 'non-essential',
+}

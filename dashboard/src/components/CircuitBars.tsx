@@ -1,4 +1,5 @@
 import { Badge } from './Badge'
+import { PRIORITY_LABEL, PRIORITY_STATUS, STATUS_COLORS } from './status'
 import type { CircuitLive } from '../lib/types'
 
 // Ranked horizontal load bars (§13.2). Bar width is relative to the
@@ -15,8 +16,16 @@ export function CircuitBars({ circuits }: { circuits: CircuitLive[] }) {
         return (
           <div key={c.circuit_id} className="flex items-center gap-3">
             <div className="w-40 shrink-0 truncate text-[13px] text-text" title={c.circuit_name ?? undefined}>
+              {c.circuit_priority && (
+                <span
+                  className="mr-1 text-[11px]"
+                  style={{ color: STATUS_COLORS[PRIORITY_STATUS[c.circuit_priority]].fg }}
+                  title={`${PRIORITY_LABEL[c.circuit_priority]} circuit`}
+                >
+                  ●
+                </span>
+              )}
               {c.circuit_name ?? `Channel ${c.channel_num}`}
-              {c.is_critical && <span className="ml-1 text-[11px] text-act">●</span>}
             </div>
             <div className="relative h-4 flex-1 overflow-hidden rounded bg-subtle">
               <div

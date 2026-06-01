@@ -70,7 +70,7 @@ async def _live_snapshot(home_id: int) -> dict:
     )
     circuits = await db.fetch(
         """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name,
-                  pc.is_critical, pc.is_controllable,
+                  pc.is_critical, pc.is_controllable, pc.circuit_priority::text,
                   r.power_w, r.is_enabled, r.ts
            FROM panel_circuits pc
            JOIN devices d ON d.device_id = pc.device_id
@@ -136,6 +136,7 @@ async def _live_snapshot(home_id: int) -> dict:
                 "circuit_name": c["circuit_name"],
                 "is_critical": c["is_critical"],
                 "is_controllable": c["is_controllable"],
+                "circuit_priority": c["circuit_priority"],
                 "power_w": _w(c["power_w"]),
                 "is_enabled": c["is_enabled"],
                 "ts": _iso(c["ts"]),
