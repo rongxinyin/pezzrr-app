@@ -211,3 +211,46 @@ class EcobeeClient:
                         self.account_name)
             return {}
         return {t["identifier"]: t for t in thermostats}
+
+    def set_temperature(self, thermostat_id, heat_setpoint_f=None,
+                        cool_setpoint_f=None, hold_type="nextTransition"):
+        """Push a setHold to one thermostat (setpoints in Fahrenheit).
+
+        Mirrors ecobee_agent.set_temperature: POST /thermostat with a setHold
+        function carrying coolHoldTemp / heatHoldTemp in tenths of a degree F.
+        Raises on a non-zero Ecobee status so callers can record the failure."""
+        if heat_setpoint_f is None and cool_setpoint_f is None:
+            raise ValueError("set_temperature needs a heat or cool setpoint")
+        self._ensure_valid_token()
+
+        params = {"holdType": hold_type}
+        if heat_setpoint_f is not None:
+            params["heatHoldTemp"] = int(round(heat_setpoint_f * 10))
+        if cool_setpoint_f is not None:
+            params["coolHoldTemp"] = int(round(cool_setpoint_f * 10))
+
+        payload = {
+            "selection": {
+                "selectionType": "thermostats",
+                "selectionMatch": str(thermostat_id),
+            },
+            "functions": [{"type": "setHold", "params": params}],
+        }
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(
+            f"{self.api_base_url}/thermostat",
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        status = data.get("status", {})
+        if status.get("code") not in (0, None):
+            raise RuntimeError(
+                f"Ecobee setHold failed: {status.get('code')} {status.get('message')}"
+            )
+        return data

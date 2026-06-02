@@ -91,6 +91,48 @@ def _ecoflow_client_for_sn(sn: str):
     return None
 
 
+def _ecobee_client_for_thermostat(identifier: str):
+    """Build an EcobeeClient for the account that owns this thermostat id, or
+    None. Imported lazily so the API doesn't hard-depend on data_collectors."""
+    from data_collectors.config import iter_ecobee_accounts, iter_ecobee_devices
+    from data_collectors.ecobee_client import EcobeeClient
+
+    account_name = None
+    for dev in iter_ecobee_devices():
+        if str(dev.get("device_id")) == str(identifier):
+            account_name = dev.get("account_name")
+            break
+    if account_name is None:
+        return None
+    for acc in iter_ecobee_accounts():
+        if acc.get("name") == account_name:
+            return EcobeeClient(acc)
+    return None
+
+
+async def _actuate_thermostat(identifier: str, params: dict) -> tuple[bool, Optional[str]]:
+    """Push a setpoint hold to the Ecobee (blocking client off-loop). The
+    dashboard sends setpoints in Celsius; the Ecobee API wants Fahrenheit.
+    Returns (success, error_msg)."""
+    client = _ecobee_client_for_thermostat(identifier)
+    if client is None:
+        return False, f"No Ecobee credentials for thermostat {identifier}"
+    heat_c = params.get("heat_setpoint_c")
+    cool_c = params.get("cool_setpoint_c")
+    heat_f = heat_c * 9 / 5 + 32 if heat_c is not None else None
+    cool_f = cool_c * 9 / 5 + 32 if cool_c is not None else None
+    if heat_f is None and cool_f is None:
+        return False, "setpoint_adjust needs heat_setpoint_c or cool_setpoint_c"
+    hold_type = params.get("hold_type", "nextTransition")
+    try:
+        await asyncio.to_thread(
+            client.set_temperature, identifier, heat_f, cool_f, hold_type
+        )
+    except Exception as exc:  # noqa: BLE001 — surface as a failed action, not a 500
+        return False, str(exc)
+    return True, None
+
+
 async def _actuate_panel_mode(sn: str, params: dict) -> tuple[bool, Optional[str]]:
     """Push panel-mode params to the EcoFlow SHP2 (blocking client off-loop).
     Returns (success, error_msg)."""
@@ -104,6 +146,26 @@ async def _actuate_panel_mode(sn: str, params: dict) -> tuple[bool, Optional[str
     if str(out.get("code")) != "0":
         return False, out.get("message", "EcoFlow write failed")
     return True, None
+
+
+def _bus_params(req: DispatchRequest) -> dict:
+    """Params shaped for the VOLTTRON CommandTranslator. The dashboard sends
+    thermostat setpoints in Celsius (`*_setpoint_c`); the translator and Ecobee
+    agent expect Fahrenheit (`*_setpoint`), so convert before publishing. Other
+    target kinds pass through unchanged (panel-mode keys match on both sides)."""
+    if req.target.kind != "thermostat":
+        return req.params
+    out = {
+        k: v for k, v in req.params.items()
+        if k not in ("cool_setpoint_c", "heat_setpoint_c")
+    }
+    cool_c = req.params.get("cool_setpoint_c")
+    heat_c = req.params.get("heat_setpoint_c")
+    if cool_c is not None:
+        out["cool_setpoint"] = round(cool_c * 9 / 5 + 32, 1)
+    if heat_c is not None:
+        out["heat_setpoint"] = round(heat_c * 9 / 5 + 32, 1)
+    return out
 
 
 @router.post("/control/dispatch", response_model=DispatchResponse)
@@ -146,6 +208,23 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
         else:
             device_id, panel_sn = await _panel_for_home(req.home_id)
 
+    # Thermostat setpoint dispatch: resolve the Ecobee identifier now so a bad
+    # device fails before we record, and so the bus-disabled path can actuate.
+    thermo_id: Optional[str] = None
+    if req.target.kind == "thermostat":
+        if device_id is None:
+            raise HTTPException(status_code=422, detail="thermostat target requires device_id")
+        row = await db.fetchrow(
+            """SELECT api_identifier, home_id
+               FROM devices WHERE device_id = $1 AND device_type = 'thermostat'""",
+            device_id,
+        )
+        if row is None or not row["api_identifier"]:
+            raise HTTPException(status_code=404, detail="No thermostat for device_id")
+        if row["home_id"] != req.home_id:
+            raise HTTPException(status_code=422, detail="Thermostat does not belong to this home")
+        thermo_id = row["api_identifier"]
+
     # Safety: never curtail critical / non-controllable circuits.
     if req.target.kind == "circuit":
         if circuit_id is None:
@@ -182,7 +261,7 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
                 "home_id": req.home_id,
                 "action_type": req.action_type,
                 "target": req.target.model_dump(),
-                "params": req.params,
+                "params": _bus_params(req),
                 "event_id": req.event_id,
             },
         )
@@ -193,6 +272,18 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
     # back onto the same control_actions row the VOLTTRON path would have.
     if req.target.kind == "battery_mode" and panel_sn is not None:
         success, error_msg = await _actuate_panel_mode(panel_sn, req.params)
+        await db.execute(
+            """UPDATE control_actions
+               SET success = $2, acknowledged_at = NOW(), error_msg = $3
+               WHERE action_id = $1""",
+            action_id, success, error_msg,
+        )
+        return DispatchResponse(
+            action_id=action_id, status="success" if success else "failed"
+        )
+
+    if req.target.kind == "thermostat" and thermo_id is not None:
+        success, error_msg = await _actuate_thermostat(thermo_id, req.params)
         await db.execute(
             """UPDATE control_actions
                SET success = $2, acknowledged_at = NOW(), error_msg = $3
