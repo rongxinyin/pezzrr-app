@@ -36,11 +36,21 @@ class EcoFlowClient:
     # Auth helpers (copied from simple_test_ecoflow.py:157-200)
     # ------------------------------------------------------------------
     @staticmethod
+    def _sign_value(v):
+        """Render a value the way it appears in the JSON body, so the signature
+        string matches what EcoFlow recomputes server-side. Python's str(bool)
+        is `True`/`False`, but JSON booleans are lowercase — signing the
+        capitalized form is rejected as "signature is wrong"."""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return v
+
+    @staticmethod
     def _get_qstring(params):
         if not params:
             return ""
         sorted_params = sorted(params.items())
-        return "&".join(f"{k}={v}" for k, v in sorted_params)
+        return "&".join(f"{k}={EcoFlowClient._sign_value(v)}" for k, v in sorted_params)
 
     @staticmethod
     def _flatten(obj, prefix=""):
