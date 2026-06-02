@@ -198,6 +198,39 @@ class ControlAdvisoryRow(BaseModel):
     expected_energy_kwh: Optional[float] = None
 
 
+# Forward 24h setpoint plan for the Thermostat Setpoint Control card.
+# One series per controller (baseline | rbc | mpc) on a 15-min grid plus the
+# forecast outdoor-air temperature, so the dashboard can compare the strategies
+# before promoting one into a live setpoint_adjust dispatch.
+SETPOINT_CONTROLLERS = ("baseline", "rbc", "mpc")
+
+
+class SetpointPlanPoint(BaseModel):
+    ts: datetime
+    cool_setpoint_c: Optional[float] = None
+    heat_setpoint_c: Optional[float] = None
+    predicted_indoor_temp_c: Optional[float] = None
+
+
+class ForecastPoint(BaseModel):
+    ts: datetime
+    outdoor_temp_c: Optional[float] = None
+
+
+class SetpointPlan(BaseModel):
+    home_id: int
+    controller: str
+    mode: str  # cool | heat | both
+    start: datetime
+    dt_s: int
+    available: bool = True
+    note: Optional[str] = None
+    immediate_cool_setpoint_c: Optional[float] = None
+    immediate_heat_setpoint_c: Optional[float] = None
+    points: list[SetpointPlanPoint] = []
+    forecast: list[ForecastPoint] = []
+
+
 # =====================================================================
 # Demand response (§13.4)
 # =====================================================================

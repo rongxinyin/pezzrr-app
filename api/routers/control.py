@@ -14,22 +14,27 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth import User, _has_home_scope, get_current_user, require, require_dispatch
 from ..control_bus import control_bus, control_topic
-from ..db import db
+from ..db import CONFIG_DIR, db
 from ..models import (
     ACTION_TYPES,
     PANEL_MODE_PARAMS,
+    SETPOINT_CONTROLLERS,
     ControlActionRow,
     ControlAdvisoryRow,
     DispatchRequest,
     DispatchResponse,
+    ForecastPoint,
     PanelModeRow,
+    SetpointPlan,
+    SetpointPlanPoint,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["control"])
@@ -232,6 +237,229 @@ async def panel_mode(home_id: int = Query(...), user: User = Depends(get_current
         backupReserveSoc=_quota_lookup(quota, "backupReserveSoc"),
         chargeWattPower=_quota_lookup(quota, "chargeWattPower"),
         foceChargeHight=_quota_lookup(quota, "foceChargeHight"),
+    )
+
+
+# =====================================================================
+# Thermostat setpoint plan — forward 24h, one series per controller
+# (docs/DASHBOARD_DESIGN.md §10). baseline / rbc are synthesized from
+# mpc_config; mpc is read from the latest control_advisories schedule.
+# =====================================================================
+_PLAN_STEPS = 96
+_PLAN_DT_S = 900
+F_TO_C_DELTA = 5.0 / 9.0
+_mpc_config_cache: Optional[dict] = None
+
+
+def _f_to_c(f) -> Optional[float]:
+    return None if f is None else round((float(f) - 32.0) * 5.0 / 9.0, 3)
+
+
+def _floor_quarter(dt: datetime) -> datetime:
+    return dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+
+
+def _mpc_config() -> dict:
+    """config/mpc_config.json (gitignored). Empty dict if absent."""
+    global _mpc_config_cache
+    if _mpc_config_cache is None:
+        try:
+            with open(os.path.join(CONFIG_DIR, "mpc_config.json")) as f:
+                _mpc_config_cache = json.load(f)
+        except FileNotFoundError:
+            _mpc_config_cache = {}
+    return _mpc_config_cache
+
+
+def _baseline_setpoints(home_name: str):
+    """(cool_c, heat_c, mode) comfort baseline for this home from mpc_config:
+    per-home baseline_setpoints overrides defaults, comfort edges are the last
+    fallback. mode gates the meaningful side (cool-only homes -> heat None)."""
+    cfg = _mpc_config()
+    hc = (cfg.get("homes") or {}).get(home_name, {})
+    mode = hc.get("mode", "both")
+    base = dict((cfg.get("defaults") or {}).get("baseline_setpoints") or {})
+    base.update(hc.get("baseline_setpoints") or {})
+    cool_c = _f_to_c(base.get("cool_setpoint_f"))
+    heat_c = _f_to_c(base.get("heat_setpoint_f"))
+    comfort = hc.get("comfort") or {}
+    if cool_c is None:
+        cool_c = comfort.get("cool_max_c")
+    if heat_c is None:
+        heat_c = comfort.get("heat_min_c")
+    if mode == "cool":
+        heat_c = None
+    elif mode == "heat":
+        cool_c = None
+    return (
+        float(cool_c) if cool_c is not None else None,
+        float(heat_c) if heat_c is not None else None,
+        mode,
+    )
+
+
+def _rbc_offsets_c() -> tuple[float, float]:
+    rbc = (_mpc_config().get("defaults") or {}).get("rbc") or {}
+    sym = float(rbc.get("setpoint_offset_f", 2.0))
+    return (
+        float(rbc.get("cool_offset_f", sym)) * F_TO_C_DELTA,
+        float(rbc.get("heat_offset_f", sym)) * F_TO_C_DELTA,
+    )
+
+
+async def _rbc_trigger_windows(window_start, window_end):
+    """OpenADR events overlapping the window that trigger band-widening (DR /
+    outage), per mpc_config defaults.rbc.trigger. Returns [(start, end), ...]."""
+    trig = ((_mpc_config().get("defaults") or {}).get("rbc") or {}).get("trigger", {})
+    period_types = [p.lower() for p in trig.get("period_types", [])]
+    keywords = [k.lower() for k in trig.get("event_name_contains", [])]
+    rows = await db.fetch(
+        """SELECT DISTINCT ON (event_id)
+                  event_name, program_name, period_type, interval_start, interval_end
+           FROM openadr_events
+           WHERE interval_start < $2 AND interval_end > $1
+           ORDER BY event_id, ts DESC""",
+        window_start, window_end,
+    )
+    windows = []
+    for r in rows:
+        pt = (r["period_type"] or "").lower()
+        hay = f"{r['event_name'] or ''} {r['program_name'] or ''}".lower()
+        if (pt and pt in period_types) or any(k in hay for k in keywords):
+            windows.append((r["interval_start"], r["interval_end"]))
+    return windows
+
+
+async def _forecast_oat(home_id, window_start, window_end):
+    """Forecast outdoor-air temperature for the window, latest forecast run."""
+    rows = await db.fetch(
+        """SELECT wf.forecast_ts AS ts, wf.temp_c
+           FROM weather_forecast wf
+           JOIN weather_locations wl ON wl.location_id = wf.location_id
+           WHERE wl.home_id = $1
+             AND wf.generated_at = (
+                 SELECT max(wf2.generated_at)
+                 FROM weather_forecast wf2
+                 JOIN weather_locations wl2 ON wl2.location_id = wf2.location_id
+                 WHERE wl2.home_id = $1)
+             AND wf.forecast_ts >= $2 AND wf.forecast_ts <= $3
+           ORDER BY wf.forecast_ts""",
+        home_id, window_start, window_end,
+    )
+    return [
+        ForecastPoint(ts=r["ts"], outdoor_temp_c=float(r["temp_c"]) if r["temp_c"] is not None else None)
+        for r in rows
+    ]
+
+
+async def _mpc_plan(home_id):
+    """Forward schedule from the latest MPC advisory's detail arrays, or None."""
+    row = await db.fetchrow(
+        """SELECT detail FROM control_advisories
+           WHERE home_id = $1 AND controller = 'mpc'
+           ORDER BY ts DESC LIMIT 1""",
+        home_id,
+    )
+    if row is None or row["detail"] is None:
+        return None
+    d = row["detail"] if isinstance(row["detail"], dict) else json.loads(row["detail"])
+    cool = d.get("recommended_cool_setpoint_c")
+    if not isinstance(cool, list) or not d.get("start_utc"):
+        return None
+    heat = d.get("recommended_heat_setpoint_c")
+    pred = d.get("predicted_indoor_temp_c")
+    start = datetime.fromisoformat(d["start_utc"])
+    dt_s = int(float(d.get("dt_s", _PLAN_DT_S)))
+
+    def at(arr, i):
+        if isinstance(arr, list) and i < len(arr) and arr[i] is not None:
+            return float(arr[i])
+        return None
+
+    points = [
+        SetpointPlanPoint(
+            ts=start + timedelta(seconds=dt_s * i),
+            cool_setpoint_c=at(cool, i),
+            heat_setpoint_c=at(heat, i),
+            predicted_indoor_temp_c=at(pred, i),
+        )
+        for i in range(len(cool))
+    ]
+    imm_cool = d.get("immediate_cool_setpoint_c")
+    imm_heat = d.get("immediate_heat_setpoint_c")
+    return (
+        start, dt_s, points,
+        float(imm_cool) if imm_cool is not None else None,
+        float(imm_heat) if imm_heat is not None else None,
+    )
+
+
+@router.get("/control/setpoint-plan", response_model=SetpointPlan)
+async def setpoint_plan(
+    home_id: int = Query(...),
+    controller: str = Query("baseline"),
+    user: User = Depends(get_current_user),
+):
+    if not _has_home_scope(user, home_id):
+        raise HTTPException(status_code=403, detail="Home not in scope")
+    if controller not in SETPOINT_CONTROLLERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"controller must be one of {list(SETPOINT_CONTROLLERS)}",
+        )
+    hrow = await db.fetchrow("SELECT home_name FROM homes WHERE home_id = $1", home_id)
+    if hrow is None:
+        raise HTTPException(status_code=404, detail="Home not found")
+    cool_c, heat_c, mode = _baseline_setpoints(hrow["home_name"])
+
+    if controller == "mpc":
+        mpc = await _mpc_plan(home_id)
+        if mpc is None:
+            start = _floor_quarter(datetime.now(timezone.utc))
+            end = start + timedelta(seconds=_PLAN_DT_S * _PLAN_STEPS)
+            return SetpointPlan(
+                home_id=home_id, controller=controller, mode=mode,
+                start=start, dt_s=_PLAN_DT_S, available=False,
+                note="No MPC advisory available for this home.",
+                forecast=await _forecast_oat(home_id, start, end),
+            )
+        start, dt_s, points, imm_cool, imm_heat = mpc
+        end = start + timedelta(seconds=dt_s * len(points))
+        return SetpointPlan(
+            home_id=home_id, controller=controller, mode=mode,
+            start=start, dt_s=dt_s,
+            immediate_cool_setpoint_c=imm_cool, immediate_heat_setpoint_c=imm_heat,
+            points=points, forecast=await _forecast_oat(home_id, start, end),
+        )
+
+    # baseline | rbc: synthesize the forward grid from config. RBC widens the
+    # band during DR/outage event windows; baseline holds the comfort setpoints.
+    start = _floor_quarter(datetime.now(timezone.utc))
+    end = start + timedelta(seconds=_PLAN_DT_S * _PLAN_STEPS)
+    windows = []
+    cool_off_c = heat_off_c = 0.0
+    if controller == "rbc":
+        windows = await _rbc_trigger_windows(start, end)
+        cool_off_c, heat_off_c = _rbc_offsets_c()
+
+    points = []
+    for i in range(_PLAN_STEPS):
+        ts = start + timedelta(seconds=_PLAN_DT_S * i)
+        relaxed = any(w0 <= ts < w1 for w0, w1 in windows)
+        c, h = cool_c, heat_c
+        if relaxed:
+            if c is not None and mode in ("cool", "both"):
+                c = round(c + cool_off_c, 3)
+            if h is not None and mode in ("heat", "both"):
+                h = round(h - heat_off_c, 3)
+        points.append(SetpointPlanPoint(ts=ts, cool_setpoint_c=c, heat_setpoint_c=h))
+
+    return SetpointPlan(
+        home_id=home_id, controller=controller, mode=mode,
+        start=start, dt_s=_PLAN_DT_S,
+        immediate_cool_setpoint_c=points[0].cool_setpoint_c,
+        immediate_heat_setpoint_c=points[0].heat_setpoint_c,
+        points=points, forecast=await _forecast_oat(home_id, start, end),
     )
 
 

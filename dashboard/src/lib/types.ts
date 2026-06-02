@@ -88,6 +88,24 @@ export interface PanelEnvelope {
   points: PanelPoint[]
 }
 
+export interface ThermostatPoint {
+  bucket: string
+  indoor_temp_c: number | null
+  outdoor_temp_c: number | null
+  indoor_humidity_pct: number | null
+  heat_setpoint_c: number | null
+  cool_setpoint_c: number | null
+}
+
+export interface ThermostatEnvelope {
+  home_id: number
+  bucket: string
+  from: string
+  to: string
+  count: number
+  points: ThermostatPoint[]
+}
+
 // =====================================================================
 // Control (dispatch + audit) — matches api/models.py
 // =====================================================================
@@ -151,6 +169,34 @@ export interface DispatchRequest {
 export interface DispatchResponse {
   action_id: number
   status: string
+}
+
+export type SetpointController = 'baseline' | 'rbc' | 'mpc'
+
+export interface SetpointPlanPoint {
+  ts: string
+  cool_setpoint_c: number | null
+  heat_setpoint_c: number | null
+  predicted_indoor_temp_c: number | null
+}
+
+export interface ForecastPoint {
+  ts: string
+  outdoor_temp_c: number | null
+}
+
+export interface SetpointPlan {
+  home_id: number
+  controller: SetpointController
+  mode: string
+  start: string
+  dt_s: number
+  available: boolean
+  note: string | null
+  immediate_cool_setpoint_c: number | null
+  immediate_heat_setpoint_c: number | null
+  points: SetpointPlanPoint[]
+  forecast: ForecastPoint[]
 }
 
 // =====================================================================

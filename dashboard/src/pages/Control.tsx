@@ -8,6 +8,8 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AdvisoryCard } from '../components/AdvisoryCard'
 import { ActionLog } from '../components/ActionLog'
 import { PanelModeCard } from '../components/PanelModeCard'
+import { SetpointControlCard } from '../components/SetpointControlCard'
+import { ThermostatCard } from '../components/ThermostatCard'
 import { useHomeStream } from '../hooks/useHomeStream'
 import { apiFetch, ApiError } from '../lib/api'
 import type { ControlAdvisory, CircuitLive, DispatchRequest, DispatchResponse } from '../lib/types'
@@ -44,6 +46,7 @@ export function Control() {
       setErrorMsg(null)
       qc.invalidateQueries({ queryKey: ['control-actions', homeId] })
       qc.invalidateQueries({ queryKey: ['panel-mode', homeId] })
+      qc.invalidateQueries({ queryKey: ['setpoint-plan', homeId] })
     },
     onError: (e) => {
       setErrorMsg(e instanceof ApiError ? e.message : 'Dispatch failed')
@@ -66,30 +69,24 @@ export function Control() {
   }
 
   function applyAdvisory(a: ControlAdvisory) {
-    const isThermostat = a.circuit_id == null && a.device_id != null
-    const request: DispatchRequest = {
-      home_id: homeId,
-      action_type: a.action_type,
-      target: a.circuit_id != null
-        ? { kind: 'circuit', circuit_id: a.circuit_id }
-        : { kind: 'thermostat', device_id: a.device_id },
-      params: isThermostat
-        ? {
-            heat_setpoint_c: a.recommended_heat_setpoint_c,
-            cool_setpoint_c: a.recommended_cool_setpoint_c,
-          }
-        : {},
-      event_id: a.event_id,
-    }
+    if (a.circuit_id == null) return
     setPending({
       title: `Apply ${a.controller.toUpperCase()} recommendation?`,
       body: `Promote this ${a.action_type.replace(/_/g, ' ')} advisory into a live dispatch.`,
       danger: false,
-      request,
+      request: {
+        home_id: homeId,
+        action_type: a.action_type,
+        target: { kind: 'circuit', circuit_id: a.circuit_id },
+        event_id: a.event_id,
+      },
     })
   }
 
   const circuits = live?.circuits ?? []
+  // Setpoint advisories are now driven by the Thermostat Setpoint Control card;
+  // only circuit advisories remain promotable here.
+  const circuitAdvisories = (advisories ?? []).filter((a) => a.circuit_id != null)
 
   return (
     <div>
@@ -108,11 +105,11 @@ export function Control() {
       )}
 
       <div className="flex flex-col gap-4">
-        {advisories && advisories.length > 0 && (
+        {circuitAdvisories.length > 0 && (
           <div>
             <h2 className="mb-2 text-[15px] font-medium text-text">Advisories</h2>
             <div className="flex flex-col gap-3">
-              {advisories.map((a) => (
+              {circuitAdvisories.map((a) => (
                 <AdvisoryCard
                   key={a.advisory_id}
                   advisory={a}
@@ -135,6 +132,20 @@ export function Control() {
             </div>
           )}
         </Card>
+
+        <ThermostatCard
+          homeId={homeId}
+          live={live?.thermostat ?? null}
+          busy={dispatch.isPending}
+          onDispatch={setPending}
+        />
+
+        <SetpointControlCard
+          homeId={homeId}
+          live={live?.thermostat ?? null}
+          busy={dispatch.isPending}
+          onDispatch={setPending}
+        />
 
         <PanelModeCard homeId={homeId} busy={dispatch.isPending} onDispatch={setPending} />
 
