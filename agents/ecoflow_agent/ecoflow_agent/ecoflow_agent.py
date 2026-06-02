@@ -143,12 +143,22 @@ class EcoFlowAgent(Agent):
 
         _log.info("EcoFlow Agent started, waiting for configuration...")
 
+    @staticmethod
+    def _sign_value(v):
+        """Render a value as it appears in the JSON body so the signature
+        matches what EcoFlow recomputes server-side. Python str(bool) is
+        True/False, but JSON booleans are lowercase — the capitalized form is
+        rejected as "signature is wrong"."""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return v
+
     def _get_qstring(self, params):
         """Convert params dict to sorted query string"""
         if not params:
             return ""
         sorted_params = sorted(params.items())
-        return "&".join([f"{k}={v}" for k, v in sorted_params])
+        return "&".join([f"{k}={self._sign_value(v)}" for k, v in sorted_params])
 
     def _hmac_sha256(self, data, key):
         """Generate HMAC-SHA256 signature"""
