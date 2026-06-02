@@ -4,12 +4,15 @@ import { Card } from './Card'
 import { apiFetch } from '../lib/api'
 import type { DispatchRequest, PanelMode } from '../lib/types'
 
-const BACKUP_MODES: { value: number; label: string }[] = [
+const SAVINGS_MODES: { value: number; label: string }[] = [
   { value: 0, label: 'Off' },
   { value: 1, label: 'Time-of-use' },
   { value: 2, label: 'Self-powered' },
   { value: 3, label: 'Timed' },
 ]
+
+const modeLabel = (v: number | null) =>
+  SAVINGS_MODES.find((m) => m.value === v)?.label ?? '—'
 
 interface Draft {
   smartBackupMode: number | null
@@ -83,9 +86,8 @@ export function PanelModeCard({ homeId, busy, onDispatch }: Props) {
   }
 
   function apply() {
-    const modeLabel = BACKUP_MODES.find((m) => m.value === draft!.smartBackupMode)?.label
     const summary = Object.entries(changed)
-      .map(([k, v]) => (k === 'smartBackupMode' ? `mode → ${modeLabel}` : `${k} → ${v}`))
+      .map(([k, v]) => (k === 'smartBackupMode' ? `mode → ${modeLabel(draft!.smartBackupMode)}` : `${k} → ${v}`))
       .join(', ')
     onDispatch({
       title: 'Update panel operating mode?',
@@ -120,15 +122,29 @@ export function PanelModeCard({ homeId, busy, onDispatch }: Props) {
         </button>
       }
     >
+      <div
+        className="mb-3 flex items-center justify-between rounded px-3 py-2 text-[13px]"
+        style={{ background: 'var(--bg-subtle)' }}
+      >
+        <span className="text-text-muted">Current mode</span>
+        <span className="text-text">
+          <span className="font-medium">{modeLabel(data.smartBackupMode)}</span>
+          <span className="ml-2 text-text-faint">
+            EPS {data.epsModeInfo ? 'on' : 'off'}
+            {data.backupReserveSoc != null && ` · reserve ${data.backupReserveSoc}%`}
+          </span>
+        </span>
+      </div>
+
       <div className="flex flex-col gap-3">
-        <Field label="Backup mode">
+        <Field label="Savings mode">
           <select
             value={draft.smartBackupMode ?? ''}
             onChange={(e) => set('smartBackupMode', Number(e.target.value))}
             className="rounded bg-card text-[13px] text-text"
             style={{ padding: '5px 8px', border: '0.5px solid var(--border)' }}
           >
-            {BACKUP_MODES.map((m) => (
+            {SAVINGS_MODES.map((m) => (
               <option key={m.value} value={m.value}>
                 {m.label}
               </option>

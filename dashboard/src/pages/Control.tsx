@@ -121,6 +121,8 @@ export function Control() {
           </div>
         )}
 
+        <PanelModeCard homeId={homeId} busy={dispatch.isPending} onDispatch={setPending} />
+
         <Card title="Circuits">
           {circuits.length === 0 ? (
             <div className="text-[13px] text-text-muted">No circuit data.</div>
@@ -146,8 +148,6 @@ export function Control() {
           busy={dispatch.isPending}
           onDispatch={setPending}
         />
-
-        <PanelModeCard homeId={homeId} busy={dispatch.isPending} onDispatch={setPending} />
 
         <ActionLog homeId={homeId} />
       </div>
