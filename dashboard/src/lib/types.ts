@@ -128,6 +128,16 @@ export interface ControlAdvisory {
   expected_energy_kwh: number | null
 }
 
+export interface PanelMode {
+  home_id: number
+  device_id: number
+  smartBackupMode: number | null
+  epsModeInfo: boolean | null
+  backupReserveSoc: number | null
+  chargeWattPower: number | null
+  foceChargeHight: number | null
+}
+
 export type DispatchKind = 'circuit' | 'thermostat' | 'plug' | 'demand_limit' | 'battery_mode'
 
 export interface DispatchRequest {

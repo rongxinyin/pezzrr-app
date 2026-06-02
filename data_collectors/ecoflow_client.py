@@ -154,6 +154,41 @@ class EcoFlowClient:
             "params": params,
         })
 
+    # Smart Home Panel 2 (PD303) operating-mode params and their valid ranges
+    # (EcoFlow dev doc PP4). Validated before a live write so a bad value never
+    # reaches the panel. Booleans (epsModeInfo, stormIsEnable) are not range-
+    # checked. setAmp/chName per-branch are intentionally out of scope here.
+    _PANEL_MODE_RANGES = {
+        "smartBackupMode": {0, 1, 2, 3},   # 0=off,1=TOU,2=self-powered,3=timed
+        "backupReserveSoc": range(0, 101),
+        "chargeWattPower": range(500, 7201),
+        "foceChargeHight": range(80, 101),  # charge limit (doc's spelling)
+        "masterCur": range(60, 101),
+    }
+
+    def set_panel_mode(self, params, sn=None):
+        """Set Smart Home Panel 2 operating-mode params via PD303_APP_SET.
+
+        params is a subset of {smartBackupMode, epsModeInfo, backupReserveSoc,
+        chargeWattPower, foceChargeHight, masterCur, stormIsEnable}. Known
+        numeric params are range-checked against the dev doc; unknown keys are
+        rejected so a typo can't push an unintended setting to a real panel.
+        """
+        if not params:
+            raise ValueError("set_panel_mode requires at least one param")
+        for key, val in params.items():
+            allowed = self._PANEL_MODE_RANGES.get(key)
+            if allowed is not None and val not in allowed:
+                raise ValueError(f"{key}={val!r} out of range")
+            if key not in self._PANEL_MODE_RANGES and key not in ("epsModeInfo", "stormIsEnable"):
+                raise ValueError(f"unknown panel-mode param {key!r}")
+        sn = sn or self.device_sn
+        return self.set_quota_raw({
+            "sn": sn,
+            "cmdCode": "PD303_APP_SET",
+            "params": params,
+        })
+
     def get_device_quota(self, sn=None):
         """Fetch all quota data for the SHP2."""
         sn = sn or self.device_sn

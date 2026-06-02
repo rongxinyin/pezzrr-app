@@ -30,7 +30,8 @@ DO $$ BEGIN
         'channel_enable',
         'channel_disable',
         'precool',
-        'preheat'
+        'preheat',
+        'set_operating_mode'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;

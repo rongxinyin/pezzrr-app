@@ -127,6 +127,61 @@ def test_plug_relay_calls_kasa():
     assert args == ("kasa-3", "set_relay", 0)
 
 
+def test_battery_mode_set_operating_mode_calls_panel_rpc():
+    rpc = FakeRpc()
+    res = _translator(rpc).handle({
+        "action_id": 108,
+        "action_type": "set_operating_mode",
+        "target": {"kind": "battery_mode", "device_id": "HD31ZAS4HGAS0004"},
+        "params": {"backupReserveSoc": 15, "smartBackupMode": 1},
+    })
+    assert res["success"] is True
+    identity, method, args = rpc.calls[0]
+    assert identity == "ecoflow_agent"
+    assert method == "set_panel_mode_rpc"
+    assert args[0] == "HD31ZAS4HGAS0004"
+    assert args[1] == {"backupReserveSoc": 15, "smartBackupMode": 1}
+
+
+def test_battery_mode_strips_device_sn_from_panel_params():
+    rpc = FakeRpc()
+    _translator(rpc).handle({
+        "action_id": 109,
+        "action_type": "set_operating_mode",
+        "target": {"kind": "battery_mode"},
+        "params": {"device_sn": "SN-9", "epsModeInfo": True},
+    })
+    identity, method, args = rpc.calls[0]
+    assert method == "set_panel_mode_rpc"
+    assert args[0] == "SN-9"
+    assert args[1] == {"epsModeInfo": True}
+
+
+def test_battery_mode_legacy_command_calls_control_rpc():
+    rpc = FakeRpc()
+    _translator(rpc).handle({
+        "action_id": 110,
+        "action_type": "battery_charge_mode",
+        "target": {"kind": "battery_mode", "device_id": "SN-2"},
+        "params": {"command": "set_charge_limit", "value": 90},
+    })
+    identity, method, args = rpc.calls[0]
+    assert method == "control_device_rpc"
+    assert args == ("SN-2", "set_charge_limit", 90)
+
+
+def test_battery_mode_empty_params_fails():
+    rpc = FakeRpc()
+    res = _translator(rpc).handle({
+        "action_id": 111,
+        "action_type": "set_operating_mode",
+        "target": {"kind": "battery_mode", "device_id": "SN-2"},
+        "params": {},
+    })
+    assert res["success"] is False
+    assert "panel-mode params" in res["response"]["error"]
+
+
 def test_unroutable_kind_fails():
     rpc = FakeRpc()
     res = _translator(rpc).handle({

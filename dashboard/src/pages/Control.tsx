@@ -7,6 +7,7 @@ import { PRIORITY_LABEL, PRIORITY_STATUS } from '../components/status'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AdvisoryCard } from '../components/AdvisoryCard'
 import { ActionLog } from '../components/ActionLog'
+import { PanelModeCard } from '../components/PanelModeCard'
 import { useHomeStream } from '../hooks/useHomeStream'
 import { apiFetch, ApiError } from '../lib/api'
 import type { ControlAdvisory, CircuitLive, DispatchRequest, DispatchResponse } from '../lib/types'
@@ -42,6 +43,7 @@ export function Control() {
       setPending(null)
       setErrorMsg(null)
       qc.invalidateQueries({ queryKey: ['control-actions', homeId] })
+      qc.invalidateQueries({ queryKey: ['panel-mode', homeId] })
     },
     onError: (e) => {
       setErrorMsg(e instanceof ApiError ? e.message : 'Dispatch failed')
@@ -133,6 +135,8 @@ export function Control() {
             </div>
           )}
         </Card>
+
+        <PanelModeCard homeId={homeId} busy={dispatch.isPending} onDispatch={setPending} />
 
         <ActionLog homeId={homeId} />
       </div>

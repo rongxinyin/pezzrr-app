@@ -118,8 +118,30 @@ class FleetDailyRow(BaseModel):
 ACTION_TYPES = (
     "curtail", "release", "augment", "setpoint_adjust", "relay_toggle",
     "battery_charge_mode", "eps_toggle", "channel_enable", "channel_disable",
-    "precool", "preheat",
+    "precool", "preheat", "set_operating_mode",
 )
+
+# EcoFlow SHP2 (PD303) panel-mode params the dashboard may set, with valid
+# ranges (dev doc PP4). Mirrors EcoFlowClient._PANEL_MODE_RANGES; used to
+# validate /control/panel-mode and the battery_mode dispatch params before a
+# live write. Booleans are validated by type, not range.
+PANEL_MODE_PARAMS = {
+    "smartBackupMode": {0, 1, 2, 3},   # 0=off,1=TOU,2=self-powered,3=timed
+    "epsModeInfo": bool,
+    "backupReserveSoc": range(0, 101),
+    "chargeWattPower": range(500, 7201),
+    "foceChargeHight": range(80, 101),  # charge limit (doc's spelling)
+}
+
+
+class PanelModeRow(BaseModel):
+    home_id: int
+    device_id: int
+    smartBackupMode: Optional[int] = None
+    epsModeInfo: Optional[bool] = None
+    backupReserveSoc: Optional[int] = None
+    chargeWattPower: Optional[int] = None
+    foceChargeHight: Optional[int] = None
 
 
 class DispatchTarget(BaseModel):

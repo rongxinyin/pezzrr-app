@@ -27,6 +27,10 @@ from volttron.client import Agent, Core, RPC
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
+# The signed quota endpoint (device reads + writes) only answers on api-a;
+# the legacy api.ecoflow.com /devices/control path used elsewhere here is dead.
+_QUOTA_BASE = "https://api-a.ecoflow.com"
+
 
 class EcoFlowAgent(Agent):
     """
@@ -184,6 +188,79 @@ class EcoFlowAgent(Agent):
         except Exception as e:
             _log.error(f"Error generating signature: {e}")
             return None
+
+    @staticmethod
+    def _flatten(obj, prefix=""):
+        """Flatten a nested dict/list into EcoFlow's signing key=value pairs
+        (dotted keys `params.key`, bracketed array indices). A signed PUT signs
+        the *body*, not a query string, so nested params must flatten first."""
+        items = {}
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = f"{prefix}.{k}" if prefix else str(k)
+                items.update(EcoFlowAgent._flatten(v, key))
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                items.update(EcoFlowAgent._flatten(v, f"{prefix}[{i}]"))
+        else:
+            items[prefix] = obj
+        return items
+
+    # SHP2 (PD303) operating-mode params + valid ranges (dev doc PP4); mirrors
+    # data_collectors.ecoflow_client and api.models.PANEL_MODE_PARAMS. Checked
+    # before the live PUT so a bad value never reaches the panel. epsModeInfo /
+    # stormIsEnable are booleans, not range-checked.
+    _PANEL_MODE_RANGES = {
+        "smartBackupMode": {0, 1, 2, 3},
+        "backupReserveSoc": range(0, 101),
+        "chargeWattPower": range(500, 7201),
+        "foceChargeHight": range(80, 101),
+        "masterCur": range(60, 101),
+    }
+    _PANEL_MODE_BOOLS = ("epsModeInfo", "stormIsEnable")
+
+    def _signed_quota_put(self, body):
+        """PUT a signed {sn, cmdCode, params} body to the quota endpoint. The
+        *flattened* body is part of the signature (PD303_APP_SET / YJ751)."""
+        import random
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(random.randint(100000, 999999))
+        headers_dict = {"accessKey": self.access_key, "nonce": nonce, "timestamp": timestamp}
+        sign_str = "&".join([
+            self._get_qstring(self._flatten(body)),
+            self._get_qstring(headers_dict),
+        ])
+        headers = {
+            "Content-Type": "application/json",
+            "accessKey": self.access_key,
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "sign": self._hmac_sha256(sign_str, self.secret_key),
+        }
+        url = f"{_QUOTA_BASE}/iot-open/sign/device/quota"
+        resp = requests.put(url, headers=headers, data=json.dumps(body), timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_panel_mode(self, device_sn, params):
+        """Push SHP2 operating-mode params via PD303_APP_SET (signed PUT).
+
+        params is a subset of {smartBackupMode, epsModeInfo, backupReserveSoc,
+        chargeWattPower, foceChargeHight, masterCur, stormIsEnable}. Raises on a
+        non-zero EcoFlow code so the caller's control_actions row flips to failed.
+        """
+        if not params:
+            raise ValueError("set_panel_mode requires at least one param")
+        for key, val in params.items():
+            allowed = self._PANEL_MODE_RANGES.get(key)
+            if allowed is not None and val not in allowed:
+                raise ValueError(f"{key}={val!r} out of range")
+            if key not in self._PANEL_MODE_RANGES and key not in self._PANEL_MODE_BOOLS:
+                raise ValueError(f"unknown panel-mode param {key!r}")
+        out = self._signed_quota_put({"sn": device_sn, "cmdCode": "PD303_APP_SET", "params": params})
+        if str(out.get("code")) != "0":
+            raise RuntimeError(out.get("message", "EcoFlow panel-mode write failed"))
+        return out
 
     def make_api_request(self, method, endpoint, params=None, data=None):
         """Make authenticated API request to EcoFlow"""
@@ -688,6 +765,11 @@ class EcoFlowAgent(Agent):
     def control_device_rpc(self, device_sn, command, value=None):
         """RPC method to control device"""
         return self.execute_command(device_sn, command, value)
+
+    @RPC.export
+    def set_panel_mode_rpc(self, device_sn, params):
+        """RPC: set SHP2 panel operating-mode params (PD303_APP_SET signed PUT)."""
+        return self.set_panel_mode(device_sn, params)
 
     @RPC.export
     def get_battery_info(self, device_sn):

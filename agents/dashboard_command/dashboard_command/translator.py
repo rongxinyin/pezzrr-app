@@ -102,8 +102,18 @@ class CommandTranslator:
             device = params.get("device_sn") or target.get("device_id")
             if device is None:
                 raise TranslationError("battery_mode target requires device_sn or device_id")
-            command = params.get("command", action)
-            return self._rpc(self._ecoflow, "control_device_rpc", device, command, params.get("value"))
+            # Panel operating-mode write (smartBackupMode / EPS / charge settings):
+            # the params *are* the SHP2 PD303_APP_SET param dict, so hand the whole
+            # dict to the agent's panel-mode RPC. Legacy single-value battery
+            # commands still carry an explicit {command, value} pair.
+            if action == "set_operating_mode" or "command" not in params:
+                mode_params = {k: v for k, v in params.items() if k != "device_sn"}
+                if not mode_params:
+                    raise TranslationError("set_operating_mode requires panel-mode params")
+                return self._rpc(self._ecoflow, "set_panel_mode_rpc", device, mode_params)
+            return self._rpc(
+                self._ecoflow, "control_device_rpc", device, params["command"], params.get("value")
+            )
 
         raise TranslationError(f"unroutable target.kind '{kind}'")
 

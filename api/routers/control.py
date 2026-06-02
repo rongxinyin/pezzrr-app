@@ -12,6 +12,7 @@ outranks operator but must never dispatch (§9), so role-rank alone is wrong.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Optional
@@ -23,10 +24,12 @@ from ..control_bus import control_bus, control_topic
 from ..db import db
 from ..models import (
     ACTION_TYPES,
+    PANEL_MODE_PARAMS,
     ControlActionRow,
     ControlAdvisoryRow,
     DispatchRequest,
     DispatchResponse,
+    PanelModeRow,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["control"])
@@ -40,6 +43,62 @@ def _action_status(success: Optional[bool], acknowledged_at) -> str:
     if acknowledged_at is not None:
         return "acknowledged"
     return "pending"
+
+
+def _validate_panel_params(params: dict) -> None:
+    """Reject unknown keys / out-of-range values before a live panel write."""
+    if not params:
+        raise HTTPException(status_code=422, detail="No panel-mode params given")
+    for key, val in params.items():
+        allowed = PANEL_MODE_PARAMS.get(key)
+        if allowed is None:
+            raise HTTPException(status_code=422, detail=f"Unknown panel param '{key}'")
+        if allowed is bool:
+            if not isinstance(val, bool):
+                raise HTTPException(status_code=422, detail=f"{key} must be a boolean")
+        elif val not in allowed:
+            raise HTTPException(status_code=422, detail=f"{key}={val} out of range")
+
+
+async def _panel_for_home(home_id: int):
+    """Return (device_id, sn) of the home's EcoFlow Smart Home Panel, or 404."""
+    row = await db.fetchrow(
+        """SELECT device_id, api_identifier
+           FROM devices
+           WHERE home_id = $1 AND device_type = 'smart_panel'
+           ORDER BY device_id LIMIT 1""",
+        home_id,
+    )
+    if row is None or not row["api_identifier"]:
+        raise HTTPException(status_code=404, detail="Home has no smart panel")
+    return row["device_id"], row["api_identifier"]
+
+
+def _ecoflow_client_for_sn(sn: str):
+    """Build an EcoFlowClient with the account creds that own `sn` (or None).
+    Imported lazily so the API doesn't hard-depend on data_collectors at load."""
+    from data_collectors.config import iter_ecoflow_devices
+    from data_collectors.ecoflow_client import EcoFlowClient
+
+    for dev in iter_ecoflow_devices():
+        if dev["device_sn"] == sn:
+            return EcoFlowClient(dev)
+    return None
+
+
+async def _actuate_panel_mode(sn: str, params: dict) -> tuple[bool, Optional[str]]:
+    """Push panel-mode params to the EcoFlow SHP2 (blocking client off-loop).
+    Returns (success, error_msg)."""
+    client = _ecoflow_client_for_sn(sn)
+    if client is None:
+        return False, f"No EcoFlow credentials for panel {sn}"
+    try:
+        out = await asyncio.to_thread(client.set_panel_mode, params, sn)
+    except Exception as exc:  # noqa: BLE001 — surface as a failed action, not a 500
+        return False, str(exc)
+    if str(out.get("code")) != "0":
+        return False, out.get("message", "EcoFlow write failed")
+    return True, None
 
 
 @router.post("/control/dispatch", response_model=DispatchResponse)
@@ -61,6 +120,26 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
 
     circuit_id = req.target.circuit_id
     device_id = req.target.device_id
+
+    # Panel operating-mode dispatch (smartBackupMode / EPS / charge settings).
+    # Validate params up front so a bad write never reaches a real panel, and
+    # resolve the panel SN now so a misconfigured home fails before we record.
+    panel_sn: Optional[str] = None
+    if req.target.kind == "battery_mode":
+        _validate_panel_params(req.params)
+        if device_id is not None:
+            row = await db.fetchrow(
+                """SELECT device_id, api_identifier, home_id
+                   FROM devices WHERE device_id = $1 AND device_type = 'smart_panel'""",
+                device_id,
+            )
+            if row is None or not row["api_identifier"]:
+                raise HTTPException(status_code=404, detail="No smart panel for device_id")
+            if row["home_id"] != req.home_id:
+                raise HTTPException(status_code=422, detail="Panel does not belong to this home")
+            panel_sn = row["api_identifier"]
+        else:
+            device_id, panel_sn = await _panel_for_home(req.home_id)
 
     # Safety: never curtail critical / non-controllable circuits.
     if req.target.kind == "circuit":
@@ -90,7 +169,7 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
         req.action_type, json.dumps(req.params),
     )
 
-    if gateway_id is not None:
+    if control_bus.enabled and gateway_id is not None:
         await control_bus.publish(
             control_topic(gateway_id),
             {
@@ -102,8 +181,58 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
                 "event_id": req.event_id,
             },
         )
+        return DispatchResponse(action_id=action_id, status="pending")
+
+    # Bus disabled (no broker, e.g. local dev): the API actuates the panel
+    # directly so the action still reaches hardware, then writes the result
+    # back onto the same control_actions row the VOLTTRON path would have.
+    if req.target.kind == "battery_mode" and panel_sn is not None:
+        success, error_msg = await _actuate_panel_mode(panel_sn, req.params)
+        await db.execute(
+            """UPDATE control_actions
+               SET success = $2, acknowledged_at = NOW(), error_msg = $3
+               WHERE action_id = $1""",
+            action_id, success, error_msg,
+        )
+        return DispatchResponse(
+            action_id=action_id, status="success" if success else "failed"
+        )
 
     return DispatchResponse(action_id=action_id, status="pending")
+
+
+def _quota_lookup(quota: dict, name: str):
+    """Pull a panel-mode value out of an SHP2 quota dict. EcoFlow prefixes
+    panel keys (e.g. `pd303_mc.smartBackupMode`), so match on the suffix."""
+    if name in quota:
+        return quota[name]
+    for key, val in quota.items():
+        if key.split(".")[-1] == name:
+            return val
+    return None
+
+
+@router.get("/control/panel-mode", response_model=PanelModeRow)
+async def panel_mode(home_id: int = Query(...), user: User = Depends(get_current_user)):
+    if not _has_home_scope(user, home_id):
+        raise HTTPException(status_code=403, detail="Home not in scope")
+    device_id, sn = await _panel_for_home(home_id)
+    client = _ecoflow_client_for_sn(sn)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No EcoFlow credentials for panel {sn}")
+    quota = await asyncio.to_thread(client.get_device_quota, sn)
+    if quota is None:
+        raise HTTPException(status_code=502, detail="Panel did not return quota")
+    eps = _quota_lookup(quota, "epsModeInfo")
+    return PanelModeRow(
+        home_id=home_id,
+        device_id=device_id,
+        smartBackupMode=_quota_lookup(quota, "smartBackupMode"),
+        epsModeInfo=bool(eps) if eps is not None else None,
+        backupReserveSoc=_quota_lookup(quota, "backupReserveSoc"),
+        chargeWattPower=_quota_lookup(quota, "chargeWattPower"),
+        foceChargeHight=_quota_lookup(quota, "foceChargeHight"),
+    )
 
 
 @router.get("/control/actions", response_model=list[ControlActionRow])
