@@ -49,12 +49,14 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
     if req.action_type not in ACTION_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown action_type '{req.action_type}'")
 
-    gateway_id = await db.fetchval("SELECT gateway_id FROM homes WHERE home_id = $1", req.home_id)
-    if gateway_id is None:
-        # home exists but has no gateway, or home missing — distinguish
-        exists = await db.fetchval("SELECT 1 FROM homes WHERE home_id = $1", req.home_id)
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Home not found")
+    home = await db.fetchrow("SELECT gateway_id FROM homes WHERE home_id = $1", req.home_id)
+    if home is None:
+        raise HTTPException(status_code=404, detail="Home not found")
+    gateway_id = home["gateway_id"]
+    # A gateway is only needed to route the command over the bus. When the bus
+    # is enabled, a missing gateway is a real misconfiguration; when it's
+    # disabled (no broker, e.g. local dev) dispatch still records the action.
+    if gateway_id is None and control_bus.enabled:
         raise HTTPException(status_code=422, detail="Home has no gateway configured")
 
     circuit_id = req.target.circuit_id
@@ -88,17 +90,18 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
         req.action_type, json.dumps(req.params),
     )
 
-    await control_bus.publish(
-        control_topic(gateway_id),
-        {
-            "action_id": action_id,
-            "home_id": req.home_id,
-            "action_type": req.action_type,
-            "target": req.target.model_dump(),
-            "params": req.params,
-            "event_id": req.event_id,
-        },
-    )
+    if gateway_id is not None:
+        await control_bus.publish(
+            control_topic(gateway_id),
+            {
+                "action_id": action_id,
+                "home_id": req.home_id,
+                "action_type": req.action_type,
+                "target": req.target.model_dump(),
+                "params": req.params,
+                "event_id": req.event_id,
+            },
+        )
 
     return DispatchResponse(action_id=action_id, status="pending")
 

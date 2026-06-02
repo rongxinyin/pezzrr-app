@@ -5,6 +5,7 @@ Auth pattern copied from agents/ecoflow_agent/simple_test_ecoflow.py:157-200.
 
 import hashlib
 import hmac
+import json
 import logging
 import random
 import time
@@ -42,6 +43,26 @@ class EcoFlowClient:
         return "&".join(f"{k}={v}" for k, v in sorted_params)
 
     @staticmethod
+    def _flatten(obj, prefix=""):
+        """Flatten a nested dict/list into EcoFlow's signing key=value pairs.
+
+        Nested objects use dotted keys (`params.chgPauseFlag`) and arrays use
+        bracketed indices (`data[0].x`). Required for PUT writes, where the
+        request body — not a query string — is part of the signature.
+        """
+        items = {}
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = f"{prefix}.{k}" if prefix else str(k)
+                items.update(EcoFlowClient._flatten(v, key))
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                items.update(EcoFlowClient._flatten(v, f"{prefix}[{i}]"))
+        else:
+            items[prefix] = obj
+        return items
+
+    @staticmethod
     def _hmac_sha256(data, key):
         hashed = hmac.new(
             key.encode("utf-8"), data.encode("utf-8"), hashlib.sha256
@@ -60,7 +81,8 @@ class EcoFlowClient:
 
         sign_parts = []
         if params:
-            sign_parts.append(self._get_qstring(params))
+            flat = self._flatten(params)
+            sign_parts.append(self._get_qstring(flat))
         sign_parts.append(self._get_qstring(headers_dict))
         sign_str = "&".join(sign_parts)
 
@@ -95,6 +117,42 @@ class EcoFlowClient:
             log.error("EcoFlow API error: %s", body.get("message", body))
             return None
         return body.get("data", {})
+
+    def set_quota_raw(self, body):
+        """Authenticated PUT to /iot-open/sign/device/quota with an arbitrary
+        body. The *flattened* body is part of the signature (see _flatten).
+
+        Use this for devices whose write protocol isn't the simple
+        moduleType/operateType shape (e.g. the Delta Pro Ultra / YJ751, which
+        uses a {sn, cmdCode, params} body). Returns the parsed response body so
+        callers can inspect code/message.
+        """
+        auth = self._generate_signature(body)
+        headers = {
+            "Content-Type": "application/json",
+            "accessKey": self.access_key,
+            "timestamp": auth["timestamp"],
+            "nonce": auth["nonce"],
+            "sign": auth["signature"],
+        }
+        url = f"{self.api_base_url}/iot-open/sign/device/quota"
+        resp = requests.put(url, headers=headers, data=json.dumps(body), timeout=30)
+        resp.raise_for_status()
+        out = resp.json()
+        if str(out.get("code")) != "0":
+            log.error("EcoFlow write error: %s", out.get("message", out))
+        return out
+
+    def set_quota(self, module_type, operate_type, params, sn=None):
+        """Device write for the simple protocol: body {sn, moduleType,
+        operateType, params}. For cmdFunc/cmdId devices use set_quota_raw."""
+        sn = sn or self.device_sn
+        return self.set_quota_raw({
+            "sn": sn,
+            "moduleType": module_type,
+            "operateType": operate_type,
+            "params": params,
+        })
 
     def get_device_quota(self, sn=None):
         """Fetch all quota data for the SHP2."""
