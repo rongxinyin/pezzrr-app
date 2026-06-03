@@ -4,7 +4,7 @@ import { EChart, themeColors } from './EChart'
 import { useUIStore } from '../../store/ui'
 import type { PanelPoint } from '../../lib/types'
 
-// 24h panel series: home load (filled), grid, solar — in kW.
+// 24h panel series: home load (filled), battery, solar, grid — in kW.
 export function PowerAreaChart({ points }: { points: PanelPoint[] }) {
   const theme = useUIStore((s) => s.theme)
 
@@ -15,7 +15,7 @@ export function PowerAreaChart({ points }: { points: PanelPoint[] }) {
 
     return {
       tooltip: { trigger: 'axis', valueFormatter: (v) => (v == null ? '—' : `${(+v).toFixed(2)} kW`) },
-      legend: { data: ['Home load', 'Grid', 'Solar'], textStyle: { color: c.muted }, top: 0 },
+      legend: { data: ['Home load', 'Battery power', 'Solar', 'Grid'], textStyle: { color: c.muted }, top: 0 },
       grid: { left: 48, right: 16, top: 32, bottom: 28 },
       xAxis: {
         type: 'time',
@@ -39,8 +39,9 @@ export function PowerAreaChart({ points }: { points: PanelPoint[] }) {
           color: c.accent,
           data: kw('home_load_w'),
         },
-        { name: 'Grid', type: 'line', showSymbol: false, smooth: true, color: c.info, data: kw('grid_power_w') },
+        { name: 'Battery power', type: 'line', showSymbol: false, smooth: true, color: c.info, data: kw('battery_power_w') },
         { name: 'Solar', type: 'line', showSymbol: false, smooth: true, color: c.ok, data: kw('solar_power_w') },
+        { name: 'Grid', type: 'line', showSymbol: false, smooth: true, color: c.watch, data: kw('grid_power_w') },
       ],
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
