@@ -13,10 +13,12 @@ outranks operator but must never dispatch (§9), so role-rank alone is wrong.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -339,7 +341,175 @@ async def panel_mode(home_id: int = Query(...), user: User = Depends(get_current
 _PLAN_STEPS = 96
 _PLAN_DT_S = 900
 F_TO_C_DELTA = 5.0 / 9.0
+_W_PER_TON = 3516.85  # 1 ton cooling = 12,000 BTU/h (matches hvac_model.py)
 _mpc_config_cache: Optional[dict] = None
+_hvac_model_cache: dict = {}
+
+
+def _day_window(tz_name: str):
+    """(start_utc, end_utc) spanning the home's current local day — midnight to
+    midnight, 96 quarter-hour steps. The plan covers the whole of today, so the
+    elapsed hours are shown alongside the remaining ones."""
+    tz = ZoneInfo(tz_name)
+    start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc)
+    return start_utc, start_utc + timedelta(seconds=_PLAN_DT_S * _PLAN_STEPS)
+
+
+async def _thermostat_device_id(home_id) -> Optional[int]:
+    row = await db.fetchrow(
+        """SELECT device_id FROM devices
+           WHERE home_id = $1 AND device_type = 'thermostat'
+           ORDER BY device_id LIMIT 1""",
+        home_id,
+    )
+    return row["device_id"] if row else None
+
+
+def _load_hvac_model(home_name: str) -> Optional[dict]:
+    """1R1C RC params + equipment capacity/mode from the fitted model file
+    config/hvac_model_<home>.json (gitignored). Cached; None if absent."""
+    if home_name not in _hvac_model_cache:
+        path = os.path.join(CONFIG_DIR, f"hvac_model_{home_name}.json")
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except FileNotFoundError:
+            _hvac_model_cache[home_name] = None
+            return None
+        rc = d.get("rc_model") or {}
+        eq = d.get("equipment") or {}
+        _hvac_model_cache[home_name] = {
+            "a": float(rc.get("a", 0.0)),
+            "g": float(rc.get("g", 0.0)),
+            "d": float(rc.get("d", 0.0)),
+            "capacity_w": float(eq.get("tons", 0) or 0) * _W_PER_TON,
+            "mode": eq.get("mode", "both"),
+        }
+    return _hvac_model_cache[home_name]
+
+
+def _nearest_grid(samples, start, steps, dt_s):
+    """Nearest-sample fill of (ts, value) pairs onto a regular grid. `samples`
+    must be sorted by ts. Returns a list of length `steps` (None where empty)."""
+    if not samples:
+        return [None] * steps
+    times = [s[0] for s in samples]
+    out = []
+    for i in range(steps):
+        ts = start + timedelta(seconds=dt_s * i)
+        j = bisect.bisect_left(times, ts)
+        cands = []
+        if j < len(samples):
+            cands.append(samples[j])
+        if j > 0:
+            cands.append(samples[j - 1])
+        out.append(min(cands, key=lambda s: abs((s[0] - ts).total_seconds()))[1])
+    return out
+
+
+async def _oat_grid(home_id, device_id, start, steps, dt_s):
+    """Outdoor-air temp (°C) per plan step: logged actuals for the elapsed part
+    of the day, forecast for the rest, nearest-filled onto the grid."""
+    end = start + timedelta(seconds=dt_s * steps)
+    samples = []
+    if device_id is not None:
+        rows = await db.fetch(
+            """SELECT ts, outdoor_temp_c FROM thermostat_readings
+               WHERE device_id = $1 AND ts >= $2 AND ts <= $3
+                 AND outdoor_temp_c IS NOT NULL ORDER BY ts""",
+            device_id, start, end,
+        )
+        samples += [(r["ts"], float(r["outdoor_temp_c"])) for r in rows]
+    samples += [(p.ts, p.outdoor_temp_c)
+                for p in await _forecast_oat(home_id, start, end)
+                if p.outdoor_temp_c is not None]
+    samples.sort(key=lambda x: x[0])
+    return _nearest_grid(samples, start, steps, dt_s)
+
+
+async def _indoor_actual_grid(device_id, start, steps, dt_s):
+    """Logged indoor temp (°C) per step for the elapsed part of the window;
+    None for steps still in the future (no measurement yet)."""
+    if device_id is None:
+        return [None] * steps
+    now = datetime.now(timezone.utc)
+    rows = await db.fetch(
+        """SELECT ts, indoor_temp_c FROM thermostat_readings
+           WHERE device_id = $1 AND ts >= $2 AND ts <= $3
+             AND indoor_temp_c IS NOT NULL ORDER BY ts""",
+        device_id, start, min(start + timedelta(seconds=dt_s * steps), now),
+    )
+    grid = _nearest_grid([(r["ts"], float(r["indoor_temp_c"])) for r in rows], start, steps, dt_s)
+    return [
+        v if start + timedelta(seconds=dt_s * i) <= now else None
+        for i, v in enumerate(grid)
+    ]
+
+
+async def _initial_indoor(device_id, at_ts):
+    """Indoor temp (°C) nearest `at_ts` within ±2h, or None — the prediction's
+    starting state."""
+    if device_id is None:
+        return None
+    row = await db.fetchrow(
+        """SELECT indoor_temp_c FROM thermostat_readings
+           WHERE device_id = $1 AND indoor_temp_c IS NOT NULL
+             AND ts BETWEEN $2 AND $3
+           ORDER BY abs(extract(epoch FROM (ts - $4))) LIMIT 1""",
+        device_id, at_ts - timedelta(hours=2), at_ts + timedelta(hours=2), at_ts,
+    )
+    return float(row["indoor_temp_c"]) if row and row["indoor_temp_c"] is not None else None
+
+
+async def _past_day_setpoints(device_id, start, steps, dt_s):
+    """Cool/heat setpoint series (°C) lifted from the SAME time-of-day on the
+    previous day, nearest-filled onto today's grid. (None lists if no device)."""
+    if device_id is None:
+        return [None] * steps, [None] * steps
+    prev_start = start - timedelta(days=1)
+    prev_end = prev_start + timedelta(seconds=dt_s * steps)
+    rows = await db.fetch(
+        """SELECT ts, cool_setpoint_c, heat_setpoint_c FROM thermostat_readings
+           WHERE device_id = $1 AND ts >= $2 AND ts <= $3 ORDER BY ts""",
+        device_id, prev_start, prev_end,
+    )
+    cool_s = [(r["ts"], float(r["cool_setpoint_c"])) for r in rows if r["cool_setpoint_c"] is not None]
+    heat_s = [(r["ts"], float(r["heat_setpoint_c"])) for r in rows if r["heat_setpoint_c"] is not None]
+    return (
+        _nearest_grid(cool_s, prev_start, steps, dt_s),
+        _nearest_grid(heat_s, prev_start, steps, dt_s),
+    )
+
+
+def _predict_indoor(model, T0, oat, cool, heat):
+    """Thermostatic forward simulation of indoor temp (°C) from the planned
+    setpoints. Each step free-runs the 1R1C zone, then applies just enough HVAC
+    (capped at equipment capacity) to hold the active setpoint — a smooth curve
+    that tracks the setpoint whenever capacity allows, and floats otherwise.
+    Returns Nones if the home has no fitted model or no starting temperature."""
+    if model is None or T0 is None:
+        return [None] * len(oat)
+    a, g, d, cap = model["a"], model["g"], model["d"], model["capacity_w"]
+    can_cool = model["mode"] in ("cool", "both")
+    can_heat = model["mode"] in ("heat", "both")
+    out = []
+    T = T0
+    for i, tout in enumerate(oat):
+        if tout is None:
+            out.append(round(T, 3))
+            continue
+        passive = T + a * (tout - T) + d  # next-step temp with HVAC off
+        c_sp = cool[i] if i < len(cool) else None
+        h_sp = heat[i] if i < len(heat) else None
+        q = 0.0
+        if can_cool and c_sp is not None and passive > c_sp and g > 0:
+            q = max((c_sp - passive) / g, -cap)
+        elif can_heat and h_sp is not None and passive < h_sp and g > 0:
+            q = min((h_sp - passive) / g, cap)
+        T = passive + g * q
+        out.append(round(T, 3))
+    return out
 
 
 def _f_to_c(f) -> Optional[float]:
@@ -498,7 +668,9 @@ async def setpoint_plan(
             status_code=422,
             detail=f"controller must be one of {list(SETPOINT_CONTROLLERS)}",
         )
-    hrow = await db.fetchrow("SELECT home_name FROM homes WHERE home_id = $1", home_id)
+    hrow = await db.fetchrow(
+        "SELECT home_name, timezone FROM homes WHERE home_id = $1", home_id
+    )
     if hrow is None:
         raise HTTPException(status_code=404, detail="Home not found")
     cool_c, heat_c, mode = _baseline_setpoints(hrow["home_name"])
@@ -523,34 +695,74 @@ async def setpoint_plan(
             points=points, forecast=await _forecast_oat(home_id, start, end),
         )
 
-    # baseline | rbc: synthesize the forward grid from config. RBC widens the
-    # band during DR/outage event windows; baseline holds the comfort setpoints.
-    start = _floor_quarter(datetime.now(timezone.utc))
-    end = start + timedelta(seconds=_PLAN_DT_S * _PLAN_STEPS)
-    windows = []
-    cool_off_c = heat_off_c = 0.0
-    if controller == "rbc":
+    # baseline | rbc: a full current-day grid (local midnight to midnight).
+    #   baseline -> the previous day's actual cool/heat setpoints, replayed.
+    #   rbc      -> config comfort setpoints, band-widened during DR/outage
+    #               event windows.
+    # Predicted indoor temp is simulated from each controller's own planned
+    # setpoints via the fitted RC model.
+    start, end = _day_window(hrow["timezone"])
+    device_id = await _thermostat_device_id(home_id)
+
+    cool_series = [None] * _PLAN_STEPS
+    heat_series = [None] * _PLAN_STEPS
+    if controller == "baseline":
+        past_cool, past_heat = await _past_day_setpoints(
+            device_id, start, _PLAN_STEPS, _PLAN_DT_S
+        )
+        # Replay both setpoints as the thermostat actually held them yesterday;
+        # don't gate by equipment mode here (a cool-only home still reports a
+        # heat setpoint, and the user wants both shown for the baseline).
+        for i in range(_PLAN_STEPS):
+            c = past_cool[i] if past_cool[i] is not None else cool_c
+            h = past_heat[i] if past_heat[i] is not None else heat_c
+            cool_series[i] = round(c, 3) if c is not None else None
+            heat_series[i] = round(h, 3) if h is not None else None
+    else:  # rbc
         windows = await _rbc_trigger_windows(start, end)
         cool_off_c, heat_off_c = _rbc_offsets_c()
+        for i in range(_PLAN_STEPS):
+            ts = start + timedelta(seconds=_PLAN_DT_S * i)
+            relaxed = any(w0 <= ts < w1 for w0, w1 in windows)
+            c, h = cool_c, heat_c
+            if relaxed:
+                if c is not None:
+                    c = c + cool_off_c
+                if h is not None:
+                    h = h - heat_off_c
+            cool_series[i] = round(c, 3) if c is not None and mode in ("cool", "both") else None
+            heat_series[i] = round(h, 3) if h is not None and mode in ("heat", "both") else None
 
-    points = []
-    for i in range(_PLAN_STEPS):
-        ts = start + timedelta(seconds=_PLAN_DT_S * i)
-        relaxed = any(w0 <= ts < w1 for w0, w1 in windows)
-        c, h = cool_c, heat_c
-        if relaxed:
-            if c is not None and mode in ("cool", "both"):
-                c = round(c + cool_off_c, 3)
-            if h is not None and mode in ("heat", "both"):
-                h = round(h - heat_off_c, 3)
-        points.append(SetpointPlanPoint(ts=ts, cool_setpoint_c=c, heat_setpoint_c=h))
+    oat = await _oat_grid(home_id, device_id, start, _PLAN_STEPS, _PLAN_DT_S)
+    indoor = await _indoor_actual_grid(device_id, start, _PLAN_STEPS, _PLAN_DT_S)
+    model = _load_hvac_model(hrow["home_name"])
+    T0 = await _initial_indoor(device_id, start)
+    predicted = _predict_indoor(model, T0, oat, cool_series, heat_series)
 
+    points = [
+        SetpointPlanPoint(
+            ts=start + timedelta(seconds=_PLAN_DT_S * i),
+            cool_setpoint_c=cool_series[i],
+            heat_setpoint_c=heat_series[i],
+            predicted_indoor_temp_c=predicted[i],
+            indoor_temp_c=indoor[i],
+        )
+        for i in range(_PLAN_STEPS)
+    ]
+    forecast = [
+        ForecastPoint(ts=start + timedelta(seconds=_PLAN_DT_S * i), outdoor_temp_c=oat[i])
+        for i in range(_PLAN_STEPS)
+    ]
+
+    # "Apply" should push the setpoint for the current moment, not midnight.
+    now = datetime.now(timezone.utc)
+    i_now = max(0, min(_PLAN_STEPS - 1, int((now - start).total_seconds() // _PLAN_DT_S)))
     return SetpointPlan(
         home_id=home_id, controller=controller, mode=mode,
         start=start, dt_s=_PLAN_DT_S,
-        immediate_cool_setpoint_c=points[0].cool_setpoint_c,
-        immediate_heat_setpoint_c=points[0].heat_setpoint_c,
-        points=points, forecast=await _forecast_oat(home_id, start, end),
+        immediate_cool_setpoint_c=points[i_now].cool_setpoint_c,
+        immediate_heat_setpoint_c=points[i_now].heat_setpoint_c,
+        points=points, forecast=forecast,
     )
 
 

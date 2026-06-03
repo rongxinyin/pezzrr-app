@@ -210,6 +210,7 @@ class SetpointPlanPoint(BaseModel):
     cool_setpoint_c: Optional[float] = None
     heat_setpoint_c: Optional[float] = None
     predicted_indoor_temp_c: Optional[float] = None
+    indoor_temp_c: Optional[float] = None  # logged actual (elapsed steps only)
 
 
 class ForecastPoint(BaseModel):

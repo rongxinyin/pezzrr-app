@@ -6,9 +6,9 @@ import type { ForecastPoint, SetpointPlanPoint } from '../../lib/types'
 
 const cToF = (c: number | null) => (c == null ? null : (c * 9) / 5 + 32)
 
-// Forward 24h plan for the selected controller: cooling/heating setpoints and
-// (MPC only) predicted indoor temp on the left °F axis, forecast outdoor-air
-// temp on the right °F axis.
+// Setpoint plan for the selected controller: cooling/heating setpoints and
+// predicted indoor temp on the left °F axis, outdoor-air temp on the right °F
+// axis. baseline/rbc span the current day; mpc spans its forward horizon.
 export function SetpointPlanChart({
   points,
   forecast,
@@ -26,9 +26,11 @@ export function SetpointPlanChart({
 
     const hasHeat = points.some((p) => p.heat_setpoint_c != null)
     const hasPred = points.some((p) => p.predicted_indoor_temp_c != null)
+    const hasIndoor = points.some((p) => p.indoor_temp_c != null)
 
     const legend = ['Cool setpoint']
     if (hasHeat) legend.push('Heat setpoint')
+    if (hasIndoor) legend.push('Indoor (actual)')
     if (hasPred) legend.push('Predicted indoor')
     legend.push('Outdoor (forecast)')
 
@@ -53,6 +55,16 @@ export function SetpointPlanChart({
         lineStyle: { type: 'dashed' },
         data: sp('heat_setpoint_c'),
       })
+    if (hasIndoor)
+      series.push({
+        name: 'Indoor (actual)',
+        type: 'line',
+        showSymbol: false,
+        smooth: true,
+        color: c.accent,
+        lineStyle: { width: 2.5 },
+        data: sp('indoor_temp_c'),
+      })
     if (hasPred)
       series.push({
         name: 'Predicted indoor',
@@ -60,6 +72,7 @@ export function SetpointPlanChart({
         showSymbol: false,
         smooth: true,
         color: c.accent,
+        lineStyle: { type: 'dashed', opacity: 0.8 },
         data: sp('predicted_indoor_temp_c'),
       })
     series.push({

@@ -178,6 +178,7 @@ export interface SetpointPlanPoint {
   cool_setpoint_c: number | null
   heat_setpoint_c: number | null
   predicted_indoor_temp_c: number | null
+  indoor_temp_c: number | null
 }
 
 export interface ForecastPoint {
