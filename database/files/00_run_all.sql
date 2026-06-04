@@ -34,8 +34,11 @@
 \echo '=== [8/9] Weather (Dark Sky) tables ==='
 \i 08_weather.sql
 
-\echo '=== [9/9] Circuit priority tiers (ILC scenario controller) ==='
+\echo '=== [9/10] Circuit priority tiers (ILC scenario controller) ==='
 \i 09_circuit_priority.sql
+
+\echo '=== [10/10] Operation-scenario schedule (Scenarios dashboard) ==='
+\i 10_scenario_schedule.sql
 
 \echo '=== Schema creation complete ==='
 

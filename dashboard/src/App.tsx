@@ -5,7 +5,7 @@ import { Fleet } from './pages/Fleet'
 import { Login } from './pages/Login'
 import { HomeDetail } from './pages/HomeDetail'
 import { Control } from './pages/Control'
-import { Dr } from './pages/Dr'
+import { Scenarios } from './pages/Scenarios'
 import { Energy } from './pages/Energy'
 import { Reports } from './pages/Reports'
 import { Health } from './pages/Health'
@@ -41,15 +41,16 @@ function App() {
             }
           />
           <Route
-            path="/dr"
+            path="/scenarios"
             element={
               <RequireAuth>
                 <AppShell>
-                  <Dr />
+                  <Scenarios />
                 </AppShell>
               </RequireAuth>
             }
           />
+          <Route path="/dr" element={<Navigate to="/scenarios" replace />} />
           <Route
             path="/homes/:id"
             element={

@@ -1,13 +1,207 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card } from '../components/Card'
 import { Badge } from '../components/Badge'
 import { MetricTile, MetricGrid } from '../components/MetricTile'
+import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ScenarioCalendar } from '../components/ScenarioCalendar'
 import { PriceCurveChart } from '../components/charts/PriceCurveChart'
-import { apiFetch } from '../lib/api'
-import type { DrEvent, DrParticipant, OpenAdrPrice, OpenAdrPricePoint } from '../lib/types'
+import { apiFetch, ApiError } from '../lib/api'
+import { useAuthStore } from '../store/auth'
+import { SCENARIOS, SCENARIO_LABEL, scenarioLabel, scenarioStatus } from '../lib/scenarios'
+import type {
+  DrEvent,
+  DrParticipant,
+  OpenAdrPrice,
+  OpenAdrPricePoint,
+  OperationScenario,
+  ScenarioCurrent,
+  ScenarioDispatchResult,
+} from '../lib/types'
 import type { Status } from '../components/status'
 
+const DISPATCH_ROLES = ['operator', 'admin']
+
+export function Scenarios() {
+  const role = useAuthStore((s) => s.role)
+  const canEdit = role != null && DISPATCH_ROLES.includes(role)
+
+  const { data: current } = useQuery({
+    queryKey: ['scenarios-current'],
+    queryFn: () => apiFetch<ScenarioCurrent[]>('/scenarios/current'),
+    refetchInterval: 60_000,
+  })
+
+  const [homeId, setHomeId] = useState<number | null>(null)
+  useEffect(() => {
+    if (homeId == null && current && current.length > 0) setHomeId(current[0].home_id)
+  }, [current, homeId])
+
+  const selectedHome = current?.find((h) => h.home_id === homeId) ?? null
+
+  return (
+    <div>
+      <h1 className="mb-4 text-[22px] font-medium text-text">Scenarios</h1>
+
+      {current && current.length > 1 && (
+        <div className="mb-4 flex items-center gap-2">
+          <span className="text-[13px] text-text-muted">Home</span>
+          <select
+            value={homeId ?? ''}
+            onChange={(e) => setHomeId(Number(e.target.value))}
+            className="rounded bg-card text-[13px] text-text"
+            style={{ padding: '5px 8px', border: '0.5px solid var(--border)' }}
+          >
+            {current.map((h) => (
+              <option key={h.home_id} value={h.home_id}>
+                {h.home_name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {selectedHome && (
+        <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: 16 }}>
+          <CurrentScenarioCard home={selectedHome} canEdit={canEdit} />
+          {homeId != null && <ScenarioCalendar homeId={homeId} canEdit={canEdit} />}
+        </div>
+      )}
+
+      {/* Demand response context (price + events) */}
+      <DrSection />
+    </div>
+  )
+}
+
+function CurrentScenarioCard({ home, canEdit }: { home: ScenarioCurrent; canEdit: boolean }) {
+  const qc = useQueryClient()
+  const initial = (home.scheduled_scenario ?? home.current_scenario ?? 'normal') as OperationScenario
+  const [choice, setChoice] = useState<OperationScenario>(initial)
+  const [confirm, setConfirm] = useState(false)
+  const [result, setResult] = useState<ScenarioDispatchResult | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Track the selected home: re-seed the dispatch choice when it changes.
+  useEffect(() => {
+    setChoice((home.scheduled_scenario ?? home.current_scenario ?? 'normal') as OperationScenario)
+    setResult(null)
+    setErrorMsg(null)
+  }, [home.home_id, home.scheduled_scenario, home.current_scenario])
+
+  const dispatch = useMutation({
+    mutationFn: () =>
+      apiFetch<ScenarioDispatchResult>('/scenarios/dispatch', {
+        method: 'POST',
+        body: JSON.stringify({ home_id: home.home_id, operation_scenario: choice }),
+      }),
+    onSuccess: (r) => {
+      setConfirm(false)
+      setErrorMsg(null)
+      setResult(r)
+      qc.invalidateQueries({ queryKey: ['scenarios-current'] })
+      qc.invalidateQueries({ queryKey: ['panel-mode', home.home_id] })
+    },
+    onError: (e) => {
+      setConfirm(false)
+      setErrorMsg(e instanceof ApiError ? e.message : 'Dispatch failed')
+    },
+  })
+
+  return (
+    <Card title="Current operation scenario">
+      {errorMsg && <div className="mb-3 text-[13px] text-act">{errorMsg}</div>}
+
+      <div className="mb-3 flex items-center gap-2">
+        <Badge status={scenarioStatus(home.current_scenario)}>
+          {scenarioLabel(home.current_scenario)}
+        </Badge>
+        {home.source && <span className="text-[12px] text-text-faint">{home.source}</span>}
+        {home.ts && (
+          <span className="text-[12px] text-text-faint">
+            {new Date(home.ts).toLocaleString([], {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </span>
+        )}
+      </div>
+
+      <MetricGrid cols={2}>
+        <MetricTile label="Resolved (controller)" value={scenarioLabel(home.current_scenario)} />
+        <MetricTile label="Scheduled today" value={scenarioLabel(home.scheduled_scenario)} />
+      </MetricGrid>
+
+      {canEdit && (
+        <div className="mt-4" style={{ borderTop: '0.5px solid var(--border)', paddingTop: 12 }}>
+          <div className="mb-2 text-[13px] text-text-muted">Dispatch scenario operation</div>
+          <div className="flex items-center gap-2">
+            <select
+              value={choice}
+              onChange={(e) => setChoice(e.target.value as OperationScenario)}
+              className="rounded bg-card text-[13px] text-text"
+              style={{ padding: '5px 8px', border: '0.5px solid var(--border)' }}
+            >
+              {SCENARIOS.map((s) => (
+                <option key={s} value={s}>
+                  {SCENARIO_LABEL[s]}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setConfirm(true)}
+              disabled={dispatch.isPending}
+              className="rounded text-[13px] font-medium"
+              style={{ padding: '6px 14px', color: 'var(--bg-card)', background: 'var(--accent)' }}
+            >
+              Dispatch
+            </button>
+          </div>
+
+          {result && (
+            <div className="mt-3 flex flex-col gap-1">
+              {result.dr_event_active && (
+                <div className="text-[12px] text-text-faint">DR event active — used DR battery mode.</div>
+              )}
+              {result.steps.map((s, i) => (
+                <div key={i} className="text-[12px]">
+                  <span className="text-text-muted">{s.kind}</span>{' '}
+                  <Badge status={STEP_STATUS[s.status] ?? 'info'}>{s.status}</Badge>
+                  {s.detail && <span className="ml-2 text-text-faint">{s.detail}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirm}
+        title={`Dispatch ${SCENARIO_LABEL[choice]} to ${home.home_name}?`}
+        body={`This sends live commands: the panel battery mode and the thermostat band-widen setpoints for the ${SCENARIO_LABEL[choice]} scenario.`}
+        danger={choice === 'resiliency' || choice === 'capacity_management'}
+        busy={dispatch.isPending}
+        confirmLabel="Dispatch"
+        onCancel={() => setConfirm(false)}
+        onConfirm={() => dispatch.mutate()}
+      />
+    </Card>
+  )
+}
+
+const STEP_STATUS: Record<string, Status> = {
+  success: 'ok',
+  pending: 'watch',
+  acknowledged: 'info',
+  failed: 'act',
+  skipped: 'offline',
+}
+
+// =====================================================================
+// Demand response context (moved from the old DR page)
+// =====================================================================
 function fmtRange(start: string, end: string): string {
   const s = new Date(start)
   const e = new Date(end)
@@ -28,7 +222,7 @@ function pct(v: number | null): string {
   return v == null ? '—' : `${Math.round(v * 100)}%`
 }
 
-export function Dr() {
+function DrSection() {
   const [selected, setSelected] = useState<number | null>(null)
 
   const { data: events, isLoading, error } = useQuery({
@@ -43,15 +237,24 @@ export function Dr() {
     refetchInterval: 60_000,
   })
 
+  // Pin the price curve to the current local day (midnight to midnight).
+  const dayStart = new Date()
+  dayStart.setHours(0, 0, 0, 0)
+  const dayEnd = new Date(dayStart)
+  dayEnd.setDate(dayEnd.getDate() + 1)
+
   const { data: curve } = useQuery({
-    queryKey: ['openadr-price-history'],
-    queryFn: () => apiFetch<OpenAdrPricePoint[]>('/openadr/price/history'),
+    queryKey: ['openadr-price-history', dayStart.toISOString()],
+    queryFn: () =>
+      apiFetch<OpenAdrPricePoint[]>(
+        `/openadr/price/history?from=${encodeURIComponent(dayStart.toISOString())}` +
+          `&to=${encodeURIComponent(dayEnd.toISOString())}`,
+      ),
     refetchInterval: 300_000,
   })
 
   const active = events?.find((e) => e.active) ?? null
 
-  // Default the participation table to the active event, else the latest.
   useEffect(() => {
     if (selected == null && events && events.length > 0) {
       setSelected((active ?? events[0]).event_id)
@@ -59,8 +262,8 @@ export function Dr() {
   }, [events, active, selected])
 
   return (
-    <div>
-      <h1 className="mb-4 text-[22px] font-medium text-text">Demand response</h1>
+    <div className="mt-6">
+      <h2 className="mb-3 text-[16px] font-medium text-text">Demand response</h2>
 
       {price && price.price_per_kwh != null && <PriceBanner price={price} />}
 
@@ -71,11 +274,15 @@ export function Dr() {
       )}
 
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-2" style={{ gap: 16 }}>
-        <Card title="Price curve (24h)">
+        <Card title="Price curve (today)">
           {!curve || curve.length === 0 ? (
             <div className="text-[13px] text-text-muted">No price data.</div>
           ) : (
-            <PriceCurveChart points={curve} />
+            <PriceCurveChart
+              points={curve}
+              min={dayStart.toISOString()}
+              max={dayEnd.toISOString()}
+            />
           )}
         </Card>
 

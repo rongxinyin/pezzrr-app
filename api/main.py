@@ -25,6 +25,7 @@ from .routers import (
     homes,
     live,
     reports,
+    scenarios,
     telemetry,
 )
 
@@ -72,6 +73,7 @@ app.include_router(telemetry.router)
 app.include_router(live.router)
 app.include_router(control.router)
 app.include_router(dr.router)
+app.include_router(scenarios.router)
 app.include_router(analytics.router)
 app.include_router(reports.router)
 app.include_router(health.router)
