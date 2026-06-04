@@ -4,8 +4,8 @@ data collector, without a VOLTTRON platform.
 
 Each tick resolves every configured home's operation scenario (which also
 persists the 24 h load forecast), writes MPC / RBC thermostat setpoint
-*advisories*, and builds the full-home operation sequence (panel circuits +
-battery source + smart plug) via scenario_plan. Shadow mode only: no commands
+*advisories*, and builds the panel battery-mode operation sequence (Savings mode
++ EPS backup) via scenario_plan. Shadow mode only: no commands
 are ever sent to any device. This drives the same advisory_cycle code the
 VOLTTRON agent uses; it just supplies the scheduling the platform would
 otherwise provide.

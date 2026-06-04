@@ -233,6 +233,60 @@ class SetpointPlan(BaseModel):
 
 
 # =====================================================================
+# Operation scenarios (Scenarios page — calendar + dispatch)
+# =====================================================================
+OPERATION_SCENARIOS = (
+    "normal", "load_peak_management", "capacity_management", "resiliency",
+)
+
+
+class ScenarioCurrent(BaseModel):
+    """A home's currently-resolved operation scenario for the Scenarios page."""
+    home_id: int
+    home_name: str
+    current_scenario: Optional[str] = None   # latest control_advisories.operation_scenario
+    source: Optional[str] = None             # 'advisory' | 'scheduled' | None
+    ts: Optional[datetime] = None            # when the controller last resolved it
+    scheduled_scenario: Optional[str] = None # today's operator override, if any
+
+
+class ScenarioScheduleEntry(BaseModel):
+    home_id: int
+    scenario_date: date
+    operation_scenario: str
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+
+
+class ScenarioScheduleSet(BaseModel):
+    home_id: int
+    scenario_date: date
+    operation_scenario: str
+    note: Optional[str] = None
+
+
+class ScenarioDispatchRequest(BaseModel):
+    home_id: int
+    operation_scenario: str
+
+
+class ScenarioDispatchStep(BaseModel):
+    kind: str                 # 'battery_mode' | 'thermostat'
+    action_id: Optional[int] = None
+    status: str               # pending | success | failed | skipped
+    detail: Optional[str] = None
+    params: dict = {}
+
+
+class ScenarioDispatchResult(BaseModel):
+    home_id: int
+    operation_scenario: str
+    dr_event_active: bool = False
+    steps: list[ScenarioDispatchStep] = []
+
+
+# =====================================================================
 # Demand response (§13.4)
 # =====================================================================
 class DrEventRow(BaseModel):

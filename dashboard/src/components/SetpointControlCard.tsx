@@ -26,7 +26,7 @@ interface Props {
 // 24h setpoint plans against the forecast outdoor-air temp, then promote the
 // selected controller's immediate setpoint into a live setpoint_adjust dispatch.
 export function SetpointControlCard({ homeId, live, busy, onDispatch }: Props) {
-  const [controller, setController] = useState<SetpointController>('mpc')
+  const [controller, setController] = useState<SetpointController>('rbc')
 
   const { data: plan } = useQuery({
     queryKey: ['setpoint-plan', homeId, controller],

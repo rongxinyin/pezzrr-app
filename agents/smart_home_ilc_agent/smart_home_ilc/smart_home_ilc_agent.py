@@ -551,14 +551,15 @@ class SmartHomeILCAgent(Agent):
             _log.error(f"RBC advisory failed: {e}")
 
     def run_scenario_advisory(self):
-        """Build + log the full-home operation sequence (circuits + battery +
-        plug + thermostat) for every home, in shadow mode.
+        """Build + log the panel battery-mode operation sequence for every home,
+        in shadow mode.
 
         Resolves the same operation scenario as the HVAC advisories and composes
-        the panel/battery/plug actions around the thermostat action, writing the
-        ordered sequence to control_advisories (controller='ilc'). No device
-        commands are sent. The cycle body lives in advisory_cycle so the
-        standalone run_advisory loop can drive the same logic without VOLTTRON."""
+        the panel battery mode (Savings + EPS backup) around the thermostat
+        action, writing the ordered sequence to control_advisories
+        (controller='ilc'). No device commands are sent. The cycle body lives in
+        advisory_cycle so the standalone run_advisory loop can drive the same
+        logic without VOLTTRON."""
         try:
             try:
                 from . import advisory_cycle

@@ -1,0 +1,120 @@
+{
+  "_comment": "Per-home configuration for the thermostat HVAC controllers. Runs in advisory/shadow mode: the controller computes setpoints and logs them to control_actions (no device commands). control_strategy selects the controller per home: 'mpc' (model-predictive, needs a fitted RC model) or 'rbc' (rule-based DR/outage band-widening, needs no model). Comfort bounds are indoor air-temperature limits in Celsius. NOTE: this is a sanitized example; copy to config/mpc_config.json and replace the example homes with your real home names / device_ids.",
+  "defaults": {
+    "operation_scenario": "auto",
+    "control_strategy": "rbc",
+    "dt_s": 900,
+    "horizon_hours": 24,
+    "solver": "highs",
+    "solver_fallback": ["scip"],
+    "solver_options": {
+      "highs": { "time_limit": 30, "mip_rel_gap": 0.01 },
+      "scip": { "limits/time": 30, "limits/gap": 0.01 }
+    },
+    "objective": "energy_cost",
+    "price_source": {
+      "base_tariff": "from_home",
+      "overlay_openadr_events": true,
+      "rates_file": "config/utility_rates.json"
+    },
+    "advisory": {
+      "shadow_mode": true,
+      "log_to_control_advisories": true,
+      "action_type": "setpoint_adjust",
+      "triggered_by": "ILC_agent"
+    },
+    "baseline_setpoints": {
+      "_comment": "Comfort baseline both advisory controllers compare against (cooling/heating setpoints in degrees F). The MPC records these on each advisory so the recommended-vs-baseline delta is queryable; the RBC widens the band from this baseline by the per-scenario offsets. A per-home baseline_setpoints block overrides these defaults.",
+      "cool_setpoint_f": 74,
+      "heat_setpoint_f": 70
+    },
+    "rbc": {
+      "_comment": "Rule-based controller: during an active DR/outage OpenADR event, raise the cooling setpoint by setpoint_offset_f and lower the heating setpoint by the same, widening the deadband so the HVAC coasts to idle/off for the event hours. An event is a trigger when its period_type is in trigger.period_types OR its event_name/program_name contains any trigger.event_name_contains keyword (case-insensitive).",
+      "setpoint_offset_f": 2.0,
+      "poll_interval_s": 300,
+      "triggered_by": "DR_event",
+      "action_type": "setpoint_adjust",
+      "trigger": {
+        "period_types": ["peak"],
+        "event_name_contains": ["outage", "emergency", "shed", "curtail", "dr"]
+      }
+    },
+    "scenarios": {
+      "_comment": "operation_scenario is the high-level mode input (per home, or set here as default). 'auto' resolves the mode each cycle from live signals; an explicit value ('normal'|'load_peak_management'|'capacity_management'|'resiliency') overrides detection. Within load_peak_management the control_strategy (mpc|rbc) picks the method; capacity_management and resiliency always shed HVAC by widening the band with the per-scenario offsets below. Offsets are asymmetric per the controller memo (raise cooling, lower heating); °F.",
+      "auto_detection": {
+        "priority": ["resiliency", "capacity_management", "load_peak_management", "normal"],
+        "capacity_trigger_pct": 0.80,
+        "capacity_use_forecast": true,
+        "capacity_forecast_trigger_pct": 0.80,
+        "capacity_forecast_horizon_h": 24,
+        "store_forecast": true,
+        "service_voltage_v": 240,
+        "load_peak_event_period_types": ["peak"],
+        "load_peak_event_keywords": ["shed", "curtail", "dr"],
+        "resiliency_event_keywords": ["outage", "emergency"]
+      },
+      "normal": { "cool_offset_f": 0.0, "heat_offset_f": 0.0 },
+      "load_peak_management": { "cool_offset_f": 2.0, "heat_offset_f": 2.0 },
+      "capacity_management": { "cool_offset_f": 4.0, "heat_offset_f": 2.0 },
+      "resiliency": { "cool_offset_f": 6.0, "heat_offset_f": 4.0 }
+    },
+    "panel": {
+      "_comment": "Design Configuration #2: 100A EcoFlow panel with a 60A main breaker -> 60A capacity. Capacity management trips at capacity_trigger_pct of this (48A for 60A).",
+      "design_configuration": 2,
+      "main_breaker_a": 60,
+      "resiliency_battery_max_a": 30
+    },
+    "load_management": {
+      "_comment": "Full-home ILC scenario controller (smart_home_ilc.scenario_plan). The resolved operation_scenario (shared with the HVAC layer) selects a per-scenario EcoFlow Smart Home Panel battery mode below. Circuit shedding is NOT directly controllable via the EcoFlow API -- under 'EPS backup' (epsModeInfo=true) the panel sheds by its own predefined circuit priorities. Advisory/shadow only: logged to control_advisories (controller='ilc', action_type='set_operating_mode'); no device commands are sent.",
+      "battery": {
+        "_comment": "EcoFlow Delta Pro Ultra. Reported for context (SOC health); the panel manages source/inverter internally under EPS backup.",
+        "max_output_w": 7200,
+        "min_soc_pct": 20,
+        "reserve_soc_pct": 10
+      },
+      "scenarios": {
+        "_comment": "Per-scenario panel battery mode. smartBackupMode: 0=off, 1=time_of_use, 2=self_powered, 3=timed (matches the dashboard Savings-mode selector). epsModeInfo: EPS backup on/off (panel sheds by predefined circuit priority when on). load_peak_management has a second mapping (dr_event_battery_mode) used when an actual DR event is active vs. a plain TOU peak-price period.",
+        "normal":               { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false } },
+        "load_peak_management": { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false }, "dr_event_battery_mode": { "smartBackupMode": 2, "epsModeInfo": false } },
+        "capacity_management":  { "battery_mode": { "smartBackupMode": 2, "epsModeInfo": false } },
+        "resiliency":           { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": true } }
+      }
+    },
+    "load_forecast": {
+      "_comment": "Home-load forecast consumer (smart_home_ilc.load_forecast_data). model_file is trained per-home by ecoflow_agent.train_load_model.",
+      "model_file": "config/load_model_{home}.pkl",
+      "history_days": 8,
+      "dt_s": 900,
+      "horizon_hours": 24
+    }
+  },
+  "homes": {
+    "_comment": "Replace these example homes with your real homes. 'device_id' is the thermostat device row in the devices table. 'equipment' is single_stage_ac | vs_heat_pump; 'mode' is cool | heat | both. Comfort bounds are indoor air-temperature limits in Celsius (set heat_* to null for a cool-only home).",
+    "example_home_cool": {
+      "device_id": 0,
+      "model_file": "config/hvac_model_example_home_cool.json",
+      "equipment": "single_stage_ac",
+      "mode": "cool",
+      "tariff": "E-TOU-C",
+      "comfort": {
+        "cool_min_c": 22.2,
+        "cool_max_c": 26.7,
+        "heat_min_c": null,
+        "heat_max_c": null
+      }
+    },
+    "example_home_heatpump": {
+      "device_id": 0,
+      "model_file": "config/hvac_model_example_home_heatpump.json",
+      "equipment": "vs_heat_pump",
+      "mode": "both",
+      "tariff": "E-TOU-C",
+      "comfort": {
+        "cool_min_c": 22.8,
+        "cool_max_c": 26.7,
+        "heat_min_c": 19.4,
+        "heat_max_c": 22.2
+      }
+    }
+  }
+}

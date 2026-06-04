@@ -201,6 +201,48 @@ export interface SetpointPlan {
 }
 
 // =====================================================================
+// Operation scenarios (Scenarios page) — matches api/models.py
+// =====================================================================
+export type OperationScenario =
+  | 'normal'
+  | 'load_peak_management'
+  | 'capacity_management'
+  | 'resiliency'
+
+export interface ScenarioCurrent {
+  home_id: number
+  home_name: string
+  current_scenario: OperationScenario | null
+  source: string | null
+  ts: string | null
+  scheduled_scenario: OperationScenario | null
+}
+
+export interface ScenarioScheduleEntry {
+  home_id: number
+  scenario_date: string // YYYY-MM-DD
+  operation_scenario: OperationScenario
+  note: string | null
+  created_by: string | null
+  updated_at: string | null
+}
+
+export interface ScenarioDispatchStep {
+  kind: string // 'battery_mode' | 'thermostat'
+  action_id: number | null
+  status: string // pending | success | failed | skipped
+  detail: string | null
+  params: Record<string, unknown>
+}
+
+export interface ScenarioDispatchResult {
+  home_id: number
+  operation_scenario: OperationScenario
+  dr_event_active: boolean
+  steps: ScenarioDispatchStep[]
+}
+
+// =====================================================================
 // Demand response (§13.4) — matches api/models.py
 // =====================================================================
 export interface DrEvent {
