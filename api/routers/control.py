@@ -227,6 +227,27 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
             raise HTTPException(status_code=422, detail="Thermostat does not belong to this home")
         thermo_id = row["api_identifier"]
 
+        # Ecobee setHold requires BOTH coolHoldTemp and heatHoldTemp; a
+        # one-sided hold returns a 500. When a dispatch only shifts one side
+        # (e.g. a cool-only home's scenario offset), backfill the other from
+        # the latest reading so the hold is always complete.
+        cool_set = req.params.get("cool_setpoint_c")
+        heat_set = req.params.get("heat_setpoint_c")
+        if (cool_set is None) != (heat_set is None):
+            cur = await db.fetchrow(
+                """SELECT cool_setpoint_c, heat_setpoint_c
+                   FROM thermostat_readings
+                   WHERE device_id = $1
+                     AND (cool_setpoint_c IS NOT NULL OR heat_setpoint_c IS NOT NULL)
+                   ORDER BY ts DESC LIMIT 1""",
+                device_id,
+            )
+            if cur is not None:
+                if cool_set is None and cur["cool_setpoint_c"] is not None:
+                    req.params["cool_setpoint_c"] = float(cur["cool_setpoint_c"])
+                if heat_set is None and cur["heat_setpoint_c"] is not None:
+                    req.params["heat_setpoint_c"] = float(cur["heat_setpoint_c"])
+
     # Safety: never curtail critical / non-controllable circuits.
     if req.target.kind == "circuit":
         if circuit_id is None:
