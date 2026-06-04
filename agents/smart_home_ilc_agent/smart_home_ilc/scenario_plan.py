@@ -3,34 +3,36 @@ Full-home operation-scenario controller for the smart-home ILC.
 
 The HVAC supervisor (hvac_supervisor.py) resolves *one* operation scenario per
 home from live signals and drives the thermostat. This module reuses that same
-resolution and extends it across the rest of the home energy system -- the smart
-panel circuits, the plug-in battery (source / islanding), and the optional smart
-plug -- producing an ordered *sequence of operations* per scenario:
+resolution and extends it to the EcoFlow Smart Home Panel battery mode,
+producing an ordered *sequence of operations* per scenario.
 
-    normal                - no overrides. Grid source, all circuits on, plugs on,
-                            thermostat at baseline (MPC optimizes cost separately).
-    load_peak_management  - a DR / peak-price event. Shed non-priority circuits,
-      (DR event)            switch plugs off, widen the thermostat band, and put
-                            the panel on battery (islanding). Verify the retained
-                            load stays under the battery inverter limit.
-    capacity_management   - whole-home load near the main-breaker limit. Same load
-      (over threshold)      shed + plugs off + band-widen, but stay grid-tied (no
-                            islanding) -- this is a TOU/over-threshold trim, not a
-                            backup event.
-    resiliency            - grid outage / PSPS. Island on battery, hard-widen the
-      (no grid / PSPS)      thermostat, and shed BOTH non-essential and essential
-                            circuits, keeping only the Critical "must have" loads.
+Circuit shedding is NOT directly controllable through the official EcoFlow API.
+On the Smart Home Panel, load shedding is a property of the 'EPS backup' battery
+mode: when EPS backup is on, the panel sheds circuits by its own predefined
+circuit priorities. The central controller therefore drives the panel BATTERY
+MODE (Savings mode + EPS backup), not individual circuits:
 
-Load is always shed lowest-priority-first (non_essential, then essential); the
-Critical tier is never shed. When the panel is islanded the retained load is
-checked against battery.max_output_w (7200 W); if it would exceed the inverter
-the controller escalates to the next shed tier until feasible (never shedding
-critical) and reports the result.
+    normal                - Savings mode off, EPS backup off. Grid source,
+                            thermostat at MPC/baseline.
+    load_peak_management  - peak-price period: Savings off, EPS off (MPC
+      (DR / peak price)     optimizes cost / RBC widens band; battery untouched).
+                            DR event period: Savings 'self-powered' on, EPS off.
+    capacity_management   - whole-home load near the main-breaker limit. Savings
+      (over threshold)      'self-powered' on, EPS off; widen the thermostat band.
+    resiliency            - grid outage / PSPS. EPS backup on (the panel sheds
+      (no grid / PSPS)      non-critical circuits by predefined priority), Savings
+                            off; hard-widen the thermostat.
 
-Advisory / shadow mode, exactly like the HVAC layer: the full sequence is logged
-to control_advisories (controller='ilc'); NO device commands are sent. A future
-real-actuation path would replay the same sequence into control_actions ->
-VOLTTRON. Nothing here imports volttron, so it runs under a plain venv python.
+The battery mode maps to the same dispatch contract the dashboard 'Control &
+dispatch' panel-mode card uses (action_type='set_operating_mode',
+target.kind='battery_mode'): smartBackupMode (0=off, 1=time_of_use,
+2=self_powered, 3=timed) and epsModeInfo (EPS backup bool).
+
+Advisory / shadow mode, exactly like the HVAC layer: the resolved mode is logged
+to control_advisories (controller='ilc', action_type='set_operating_mode'); NO
+device commands are sent. A future real-actuation path would replay the same
+mode into control_actions -> VOLTTRON. Nothing here imports volttron, so it runs
+under a plain venv python.
 
 Standalone:
     venv/bin/python3 -m smart_home_ilc.scenario_plan --home test_home
@@ -56,9 +58,8 @@ except ImportError:  # running as a plain script, not a package module
 
 log = logging.getLogger(__name__)
 
-# Shed order, lowest priority first. 'critical' is intentionally absent: the
-# Must-have tier is never shed, even under resiliency islanding.
-SHED_ORDER = ["non_essential", "essential"]
+# Panel Savings-mode (smartBackupMode) values, matching the dashboard selector.
+SAVINGS_MODE_LABEL = {0: "off", 1: "time_of_use", 2: "self_powered", 3: "timed"}
 
 
 # =====================================================================
@@ -93,10 +94,10 @@ def battery_state(conn, home_id):
 def circuits_with_power(conn, panel_dev_id, home_id):
     """Every circuit of a panel with its latest measured power (W).
 
-    Power comes from the most recent panel_circuit_readings timestamp for the
-    home (the collector writes all channels at one ts). Missing readings -> 0 W
-    so an un-instrumented circuit is treated as no load rather than crashing the
-    feasibility math."""
+    Reported for context only -- under EPS backup the panel sheds these by its
+    own predefined priority; the controller does not switch channels directly.
+    Power comes from the most recent panel_circuit_readings row per circuit;
+    missing readings -> 0 W."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name,
@@ -166,42 +167,28 @@ def _thermostat_step(home_name, cfg, conn, scenario, strategy):
     return step
 
 
-def _shed_set(circuits, shed_tiers):
-    """circuit_ids to switch off: controllable circuits whose priority tier is in
-    shed_tiers. Critical/non-controllable circuits are always retained."""
-    tiers = set(shed_tiers)
-    return {c["circuit_id"] for c in circuits
-            if c["is_controllable"] and not c["is_critical"]
-            and c["circuit_priority"] in tiers}
+def _battery_mode(scenario, policy, signals):
+    """Resolve the panel battery mode (smartBackupMode + epsModeInfo) for the
+    scenario from the load_management policy.
 
-
-def _retained_load_w(circuits, shed_ids):
-    return round(sum(c["power_w"] for c in circuits if c["circuit_id"] not in shed_ids), 1)
-
-
-def escalate_shed(circuits, shed_ids, applied_tiers, max_out_w, soc_ok):
-    """Under islanding, shed lower-priority tiers until the retained load clears
-    the inverter limit (or only critical remains). Pure function -- no DB.
-
-    Returns (shed_ids, applied_tiers, retained_w, escalation, feasible). The
-    critical tier is never added, so a home whose critical load alone exceeds the
-    inverter reports feasible=False rather than shedding a must-have circuit.
-    Islanding is also infeasible when the battery SOC is below minimum (soc_ok)."""
-    shed_ids = set(shed_ids)
-    applied_tiers = list(applied_tiers)
-    retained_w = _retained_load_w(circuits, shed_ids)
-    escalation = []
-    for tier in SHED_ORDER:
-        if retained_w < max_out_w:
-            break
-        if tier in applied_tiers:
-            continue
-        applied_tiers.append(tier)
-        shed_ids |= _shed_set(circuits, [tier])
-        retained_w = _retained_load_w(circuits, shed_ids)
-        escalation.append({"tier": tier, "retained_load_w": retained_w})
-    feasible = retained_w < max_out_w and soc_ok
-    return shed_ids, applied_tiers, retained_w, escalation, feasible
+    load_peak_management carries two mappings: the default `battery_mode` for a
+    plain TOU peak-price period, and `dr_event_battery_mode` used when an actual
+    DR event is active (signals['dr_event']). Returns the chosen mode plus
+    human-readable labels and which mapping was used."""
+    use_dr = (scenario == "load_peak_management"
+              and bool(signals.get("dr_event"))
+              and policy.get("dr_event_battery_mode") is not None)
+    mode = dict(policy.get("dr_event_battery_mode" if use_dr else "battery_mode", {}))
+    sbm = int(mode.get("smartBackupMode", 0))
+    eps = bool(mode.get("epsModeInfo", False))
+    return {
+        "smartBackupMode": sbm,
+        "savings_mode": SAVINGS_MODE_LABEL.get(sbm, str(sbm)),
+        "epsModeInfo": eps,
+        "eps_backup": "on" if eps else "off",
+        "dr_event": bool(signals.get("dr_event")),
+        "policy_used": "dr_event_battery_mode" if use_dr else "battery_mode",
+    }
 
 
 def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=None):
@@ -216,6 +203,7 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
     batt_cfg = lm.get("battery", {})
     max_out_w = float(batt_cfg.get("max_output_w", 7200))
     min_soc = float(batt_cfg.get("min_soc_pct", 20))
+    reserve_soc = float(batt_cfg.get("reserve_soc_pct", 10))
 
     now_utc = now_utc or datetime.now(timezone.utc)
     own = conn is None
@@ -230,41 +218,19 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
         else:
             scen = hvac_supervisor.resolve_scenario(home_name, cfg, conn, now_utc=now_utc)
         scenario = scen["scenario"]
+        signals = scen.get("signals", {})
 
         policy = lm.get("scenarios", {}).get(scenario, {})
-        shed_tiers = list(policy.get("shed_tiers", []))
-        battery_source = policy.get("battery_source", "grid")
-        plugs = policy.get("plugs", "on")
-        require_feasible = bool(policy.get("require_battery_feasible", False))
+        bm = _battery_mode(scenario, policy, signals)
 
         pdev = panel_device_id(conn, home_id)
         circuits = circuits_with_power(conn, pdev, home_id) if pdev else []
         batt = battery_state(conn, home_id)
         soc = float(batt["soc_pct"]) if batt and batt.get("soc_pct") is not None else None
         total_load_w = round(sum(c["power_w"] for c in circuits), 1)
-
-        # Initial shed set from the scenario policy.
-        shed_ids = _shed_set(circuits, shed_tiers)
-        applied_tiers = list(shed_tiers)
-
-        islanding = battery_source == "islanding"
         soc_ok = soc is None or soc >= min_soc
-        retained_w = _retained_load_w(circuits, shed_ids)
 
-        # Feasibility escalation: under islanding the retained load must clear the
-        # inverter limit. Shed the next lower-priority tier until it does (never
-        # critical).
-        escalation = []
-        feasible = True
-        if islanding and require_feasible:
-            shed_ids, applied_tiers, retained_w, escalation, feasible = escalate_shed(
-                circuits, shed_ids, applied_tiers, max_out_w, soc_ok)
-
-        shed = [c for c in circuits if c["circuit_id"] in shed_ids]
-        retained = [c for c in circuits if c["circuit_id"] not in shed_ids]
-
-        sequence = _sequence(scenario, home_name, cfg, conn, strategy,
-                             shed, plugs, battery_source, islanding, soc_ok)
+        sequence = _sequence(scenario, home_name, cfg, conn, strategy, bm, pdev)
 
         return {
             "controller": "ilc",
@@ -275,42 +241,24 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
             "operation_scenario": scenario,
             "scenario_source": scen["source"],
             "scenario_reason": scen["reason"],
-            "scenario_signals": scen.get("signals", {}),
+            "scenario_signals": signals,
             "control_strategy": strategy,
             "triggered_by": hvac_supervisor.SCENARIO_TRIGGERED_BY.get(scenario, "ILC_agent"),
-            "policy": {
-                "shed_tiers_configured": shed_tiers,
-                "shed_tiers_applied": applied_tiers,
-                "battery_source": battery_source,
-                "plugs": plugs,
-                "require_battery_feasible": require_feasible,
-            },
+            "battery_mode": bm,
             "battery": {
                 "device_id": batt["device_id"] if batt else None,
                 "soc_pct": soc,
                 "min_soc_pct": min_soc,
-                "soc_ok_for_islanding": soc_ok,
+                "reserve_soc_pct": reserve_soc,
+                "soc_ok": soc_ok,
                 "max_output_w": max_out_w,
             },
-            "load": {
-                "total_circuit_load_w": total_load_w,
-                "retained_load_w": retained_w,
-                "battery_headroom_w": round(max_out_w - retained_w, 1),
-                "islanding": islanding,
-                "battery_feasible": feasible,
-                "escalation": escalation,
-            },
-            "shed_circuits": [
+            "load": {"total_circuit_load_w": total_load_w},
+            "circuits": [
                 {"circuit_id": c["circuit_id"], "channel_num": c["channel_num"],
                  "circuit_name": c["circuit_name"], "priority": c["circuit_priority"],
-                 "power_w": c["power_w"], "ties": c["load_description"]}
-                for c in shed
-            ],
-            "retained_circuits": [
-                {"circuit_id": c["circuit_id"], "channel_num": c["channel_num"],
-                 "circuit_name": c["circuit_name"], "priority": c["circuit_priority"],
-                 "power_w": c["power_w"]}
-                for c in retained
+                 "is_critical": c["is_critical"], "power_w": c["power_w"]}
+                for c in circuits
             ],
             "sequence": sequence,
         }
@@ -319,64 +267,29 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
             conn.close()
 
 
-def _sequence(scenario, home_name, cfg, conn, strategy, shed, plugs,
-              battery_source, islanding, soc_ok):
+def _sequence(scenario, home_name, cfg, conn, strategy, bm, panel_device_id):
     """Ordered, safe sequence of operations for the scenario.
 
-    Order matters for the inverter: shed non-critical load and ease the HVAC
-    BEFORE transferring the panel onto the battery, so islanding never starts
-    against the full pre-event load. Restoration (returning to normal) is the
-    reverse and handled by the next cycle resolving back to 'normal'."""
-    steps = []
-    n = 0
+    Order matters for the inverter: ease the HVAC BEFORE the panel transfers to
+    EPS backup, so the panel never starts shedding against the full pre-event
+    load. The battery-mode step is always emitted (it also restores Savings/EPS
+    to off when the home resolves back to 'normal')."""
+    steps = [{"order": 1, **_thermostat_step(home_name, cfg, conn, scenario, strategy)}]
 
-    if scenario == "normal":
-        n += 1
-        steps.append({"order": n, "target": "all",
-                      "action": "hold_baseline",
-                      "detail": "No override: grid source, all circuits on, "
-                                "plugs on, thermostat at MPC/baseline."})
-        steps.append({"order": n, **_thermostat_step(home_name, cfg, conn, scenario, strategy)})
-        return steps
-
-    # 1) Shed circuits, lowest priority first.
-    if shed:
-        for tier in ("non_essential", "essential"):
-            tier_circuits = [c for c in shed if c["circuit_priority"] == tier]
-            if not tier_circuits:
-                continue
-            n += 1
-            steps.append({
-                "order": n, "target": "panel_circuits", "action": "channel_disable",
-                "priority_tier": tier,
-                "channels": [c["channel_num"] for c in tier_circuits],
-                "circuit_ids": [c["circuit_id"] for c in tier_circuits],
-                "detail": f"Switch OFF {len(tier_circuits)} {tier} circuit(s).",
-            })
-
-    # 2) Smart plugs.
-    if plugs == "off":
-        n += 1
-        steps.append({"order": n, "target": "plug", "action": "relay_toggle",
-                      "enabled": False, "detail": "Switch OFF smart plug(s)."})
-
-    # 3) Thermostat band-widen / setpoint reset.
-    n += 1
-    steps.append({"order": n, **_thermostat_step(home_name, cfg, conn, scenario, strategy)})
-
-    # 4) Battery source transfer LAST (only after load is reduced).
-    if islanding:
-        n += 1
-        if soc_ok:
-            steps.append({"order": n, "target": "battery", "action": "eps_toggle",
-                          "enabled": True,
-                          "detail": "Transfer panel to islanding / EPS mode, "
-                                    "battery as power source."})
-        else:
-            steps.append({"order": n, "target": "battery", "action": "eps_toggle",
-                          "enabled": False,
-                          "detail": "Battery SOC below minimum: islanding NOT "
-                                    "recommended; stay grid-tied if possible."})
+    detail = (f"Set panel battery mode: Savings '{bm['savings_mode']}', "
+              f"EPS backup {bm['eps_backup']}.")
+    if bm["epsModeInfo"]:
+        detail += (" Under EPS backup the panel sheds non-critical circuits by "
+                   "its predefined priority (shed is not directly controllable).")
+    steps.append({
+        "order": 2,
+        "target": "battery_mode",
+        "action": "set_operating_mode",
+        "device_id": panel_device_id,
+        "params": {"smartBackupMode": bm["smartBackupMode"],
+                   "epsModeInfo": bm["epsModeInfo"]},
+        "detail": detail,
+    })
     return steps
 
 
@@ -386,15 +299,14 @@ def _sequence(scenario, home_name, cfg, conn, strategy, shed, plugs,
 def write_plan_advisory(plan, cfg=None, conn=None):
     """Log the ILC plan to control_advisories (shadow mode, controller='ilc').
 
-    Writes one whole-home summary row (device_id=panel, circuit_id NULL) carrying
-    the full sequence in `detail`, plus one row per shed circuit (channel_disable)
-    so the per-circuit intent is queryable and a future real-actuation path can
-    fan the same rows into control_actions. Returns the summary advisory_id."""
+    Writes one whole-home row (device_id=panel, circuit_id NULL,
+    action_type='set_operating_mode') carrying the resolved battery mode and the
+    full plan in `detail`. A future real-actuation path replays the battery_mode
+    params into control_actions -> VOLTTRON. Returns the advisory_id."""
     cfg = cfg or mpc_data._load_json("mpc_config.json")
     shadow = cfg["defaults"]["advisory"].get("shadow_mode", True)
     triggered_by = plan["triggered_by"]
     scenario = plan["operation_scenario"]
-    summary_action = "release" if scenario == "normal" else "curtail"
 
     own = conn is None
     conn = conn or mpc_data._connect()
@@ -405,28 +317,15 @@ def write_plan_advisory(plan, cfg=None, conn=None):
                        (home_id, device_id, circuit_id, controller, action_type,
                         triggered_by, operation_scenario, scenario_source,
                         shadow_mode, detail)
-                   VALUES (%s, %s, NULL, 'ilc', %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, NULL, 'ilc', 'set_operating_mode', %s, %s, %s, %s, %s)
                    RETURNING advisory_id""",
-                (plan["home_id"], plan["panel_device_id"], summary_action,
-                 triggered_by, scenario, plan["scenario_source"],
-                 shadow, json.dumps({"shadow_mode": shadow, **plan})),
+                (plan["home_id"], plan["panel_device_id"], triggered_by, scenario,
+                 plan["scenario_source"], shadow,
+                 json.dumps({"shadow_mode": shadow, **plan})),
             )
-            summary_id = cur.fetchone()[0]
-
-            for c in plan["shed_circuits"]:
-                cur.execute(
-                    """INSERT INTO control_advisories
-                           (home_id, device_id, circuit_id, controller, action_type,
-                            triggered_by, operation_scenario, scenario_source,
-                            shadow_mode, detail)
-                       VALUES (%s, %s, %s, 'ilc', 'channel_disable', %s, %s, %s, %s, %s)""",
-                    (plan["home_id"], plan["panel_device_id"], c["circuit_id"],
-                     triggered_by, scenario, plan["scenario_source"], shadow,
-                     json.dumps({"shadow_mode": shadow, "summary_advisory_id": summary_id,
-                                 **c})),
-                )
+            advisory_id = cur.fetchone()[0]
         conn.commit()
-        return summary_id
+        return advisory_id
     finally:
         if own:
             conn.close()
@@ -440,29 +339,22 @@ def _print_plan(plan):
     print(f"[{p['home_name']}] scenario={p['operation_scenario']} "
           f"({p['scenario_source']}: {p['scenario_reason']}) strategy={p['control_strategy']}")
     b = p["battery"]
-    l = p["load"]
+    bm = p["battery_mode"]
     print(f"  battery soc={b['soc_pct']}% (min {b['min_soc_pct']}%) max_out={b['max_output_w']}W "
-          f"soc_ok_island={b['soc_ok_for_islanding']}")
-    print(f"  load total={l['total_circuit_load_w']}W retained={l['retained_load_w']}W "
-          f"headroom={l['battery_headroom_w']}W islanding={l['islanding']} "
-          f"feasible={l['battery_feasible']}")
-    if l["escalation"]:
-        print(f"  feasibility escalation: {l['escalation']}")
-    if p["shed_circuits"]:
-        chans = ", ".join(f"ch{c['channel_num']}({c['priority'][:3]},{c['power_w']}W)"
-                          for c in p["shed_circuits"])
-        print(f"  shed: {chans}")
-    else:
-        print("  shed: none")
+          f"soc_ok={b['soc_ok']}")
+    print(f"  battery mode -> Savings '{bm['savings_mode']}' "
+          f"(smartBackupMode={bm['smartBackupMode']}), EPS backup {bm['eps_backup']} "
+          f"[{bm['policy_used']}, dr_event={bm['dr_event']}]")
+    print(f"  total circuit load={p['load']['total_circuit_load_w']}W "
+          f"({len(p['circuits'])} circuits)")
     print("  sequence:")
     for s in p["sequence"]:
         extra = ""
-        if s.get("channels"):
-            extra = f" channels={s['channels']}"
-        elif s.get("target") == "thermostat":
+        if s.get("target") == "thermostat" and s.get("action") == "band_widen":
             extra = (f" cool->{s.get('recommended_cool_setpoint_c')}C "
-                     f"heat->{s.get('recommended_heat_setpoint_c')}C"
-                     if s.get("action") == "band_widen" else "")
+                     f"heat->{s.get('recommended_heat_setpoint_c')}C")
+        elif s.get("target") == "battery_mode":
+            extra = f" params={s['params']}"
         print(f"    [{s['order']}] {s['target']}/{s['action']}: "
               f"{s.get('detail','')}{extra}")
 
@@ -483,8 +375,7 @@ def main():
         _print_plan(plan)
         if args.write:
             advisory_id = write_plan_advisory(plan, cfg=cfg, conn=conn)
-            print(f"  wrote control_advisories summary advisory_id={advisory_id} "
-                  f"(+{len(plan['shed_circuits'])} circuit rows)")
+            print(f"  wrote control_advisories advisory_id={advisory_id}")
     finally:
         conn.close()
 

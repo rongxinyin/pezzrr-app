@@ -189,6 +189,11 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
     outage = _outage(panel)
     resil_event = any(_event_matches(e, [], resil_kw) for e in evs)
     peak_event = any(_event_matches(e, peak_pts, peak_kw) for e in evs)
+    # A DR event is an event matched by name/program keyword (shed/curtail/dr),
+    # distinct from a plain TOU peak-price *period* (matched by period_type).
+    # The scenario_plan battery policy differs between the two within
+    # load_peak_management, so surface DR separately.
+    dr_event = any(_event_matches(e, [], peak_kw) for e in evs)
     over_capacity_now = amps is not None and amps >= trip_a
 
     # Home-load forecast, built once per cycle, then optionally persisted and/or
@@ -228,6 +233,7 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
         "grid_outage": outage,
         "resiliency_event": resil_event,
         "peak_event": peak_event,
+        "dr_event": dr_event,
         "n_events_overlapping": len(evs),
     }
 

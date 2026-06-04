@@ -148,10 +148,10 @@ def run_scenario_advisory(cfg=None, conn=None):
     """Full-home scenario sequences (shadow mode) for every configured home.
 
     For each home this resolves the operation scenario (shared with the HVAC
-    layer) and builds the ordered circuit / battery / plug operation sequence via
-    scenario_plan, logging it to control_advisories (controller='ilc'). The HVAC
-    setpoint advisory itself is still written by run_mpc_advisory/run_rbc_advisory;
-    this layer adds the panel/battery/plug actions around it.
+    layer) and builds the panel battery-mode operation sequence via scenario_plan,
+    logging it to control_advisories (controller='ilc'). The HVAC setpoint advisory
+    itself is still written by run_mpc_advisory/run_rbc_advisory; this layer adds
+    the panel battery mode (Savings + EPS backup) around it.
 
     Like the RBC layer it dedups on scenario transition per panel, so the
     periodic can run often without flooding control_advisories. Opens its own
@@ -173,14 +173,12 @@ def run_scenario_advisory(cfg=None, conn=None):
                 prev = scenario_plan.last_logged_ilc_scenario(conn, pdev)
                 if prev == plan["operation_scenario"]:
                     continue  # no scenario transition -> nothing new to log
-                summary_id = scenario_plan.write_plan_advisory(plan, cfg=cfg, conn=conn)
-                l = plan["load"]
+                advisory_id = scenario_plan.write_plan_advisory(plan, cfg=cfg, conn=conn)
+                bm = plan["battery_mode"]
                 log.info(
                     f"ILC plan[{home_name}] scenario={plan['operation_scenario']} "
-                    f"({plan['scenario_source']}) advisory_id={summary_id} "
-                    f"shed={len(plan['shed_circuits'])} circuits "
-                    f"islanding={l['islanding']} retained={l['retained_load_w']}W "
-                    f"feasible={l['battery_feasible']}")
+                    f"({plan['scenario_source']}) advisory_id={advisory_id} "
+                    f"savings={bm['savings_mode']} eps_backup={bm['eps_backup']}")
             except SystemExit as e:
                 log.warning(f"ILC[{home_name}] skipped: {e}")
             except Exception as e:
