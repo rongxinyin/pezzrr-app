@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS control_advisories (
     controller              VARCHAR(8)          NOT NULL CHECK (controller IN ('mpc','rbc')),
     action_type             action_type_enum    NOT NULL,
     triggered_by            trigger_source_enum NOT NULL,
-    operation_scenario      VARCHAR(40),                -- normal | load_peak_management | capacity_management | resiliency
+    operation_scenario      VARCHAR(40),                -- normal | load_management_tou | load_management_dr | load_management_capacity | capacity_management | resiliency
     scenario_source         VARCHAR(16),                -- 'explicit' | 'auto'
     shadow_mode             BOOLEAN             NOT NULL DEFAULT TRUE,
 

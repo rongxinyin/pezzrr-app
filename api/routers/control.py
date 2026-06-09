@@ -150,6 +150,23 @@ async def _actuate_panel_mode(sn: str, params: dict) -> tuple[bool, Optional[str
     return True, None
 
 
+async def _actuate_circuit_amp(
+    sn: str, channel_num: int, max_input_a: int
+) -> tuple[bool, Optional[str]]:
+    """Cap one SHP2 branch's max input current (blocking client off-loop) so the
+    panel trips that circuit off. Returns (success, error_msg)."""
+    client = _ecoflow_client_for_sn(sn)
+    if client is None:
+        return False, f"No EcoFlow credentials for panel {sn}"
+    try:
+        out = await asyncio.to_thread(client.set_circuit_amp, channel_num, max_input_a, sn)
+    except Exception as exc:  # noqa: BLE001 — surface as a failed action, not a 500
+        return False, str(exc)
+    if str(out.get("code")) != "0":
+        return False, out.get("message", "EcoFlow setAmp write failed")
+    return True, None
+
+
 def _bus_params(req: DispatchRequest) -> dict:
     """Params shaped for the VOLTTRON CommandTranslator. The dashboard sends
     thermostat setpoints in Celsius (`*_setpoint_c`); the translator and Ecobee
@@ -189,6 +206,8 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
 
     circuit_id = req.target.circuit_id
     device_id = req.target.device_id
+    circuit_channel: Optional[int] = None
+    circuit_panel_sn: Optional[str] = None
 
     # Panel operating-mode dispatch (smartBackupMode / EPS / charge settings).
     # Validate params up front so a bad write never reaches a real panel, and
@@ -253,7 +272,8 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
         if circuit_id is None:
             raise HTTPException(status_code=422, detail="circuit target requires circuit_id")
         c = await db.fetchrow(
-            """SELECT pc.is_critical, pc.is_controllable, d.home_id
+            """SELECT pc.is_critical, pc.is_controllable, pc.channel_num,
+                      d.home_id, d.api_identifier
                FROM panel_circuits pc
                JOIN devices d ON d.device_id = pc.device_id
                WHERE pc.circuit_id = $1""",
@@ -265,6 +285,15 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
             raise HTTPException(status_code=422, detail="Circuit does not belong to this home")
         if c["is_critical"] or not c["is_controllable"]:
             raise HTTPException(status_code=422, detail="Circuit is critical or non-controllable")
+        circuit_channel = c["channel_num"]
+        circuit_panel_sn = c["api_identifier"]
+        # Current-limit shed: validate the amp value before it reaches a panel.
+        max_a = req.params.get("max_input_a")
+        if max_a is not None:
+            if not isinstance(max_a, (int, float)) or not (0 <= max_a <= 60):
+                raise HTTPException(
+                    status_code=422, detail="max_input_a must be 0–60 (A)"
+                )
 
     action_id = await db.fetchval(
         """INSERT INTO control_actions
@@ -307,6 +336,21 @@ async def dispatch(req: DispatchRequest, user: User = Depends(require_dispatch()
 
     if req.target.kind == "thermostat" and thermo_id is not None:
         success, error_msg = await _actuate_thermostat(thermo_id, req.params)
+        await db.execute(
+            """UPDATE control_actions
+               SET success = $2, acknowledged_at = NOW(), error_msg = $3
+               WHERE action_id = $1""",
+            action_id, success, error_msg,
+        )
+        return DispatchResponse(
+            action_id=action_id, status="success" if success else "failed"
+        )
+
+    if (req.target.kind == "circuit" and circuit_panel_sn is not None
+            and req.params.get("max_input_a") is not None):
+        success, error_msg = await _actuate_circuit_amp(
+            circuit_panel_sn, circuit_channel, int(req.params["max_input_a"])
+        )
         await db.execute(
             """UPDATE control_actions
                SET success = $2, acknowledged_at = NOW(), error_msg = $3

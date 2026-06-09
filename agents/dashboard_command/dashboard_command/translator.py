@@ -128,6 +128,16 @@ class CommandTranslator:
             channel = mapping.get("channel")
         if device_sn is None or channel is None:
             raise TranslationError(f"no panel mapping for circuit_id {circuit_id}")
+        # Current-limit shed (capacity scenario): cap the branch's max input
+        # current so the panel trips it off, rather than a hard on/off relay.
+        if params.get("max_input_a") is not None:
+            return self._rpc(
+                self._ecoflow,
+                "set_circuit_amp_rpc",
+                device_sn,
+                int(channel),
+                int(params["max_input_a"]),
+            )
         enabled = self._enabled(action, params)
         # The actual EcoFlow SHP2 load-channel write lives in the device agent
         # (docs §18 Q1); here we only issue the RPC intent.

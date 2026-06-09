@@ -40,21 +40,24 @@
       }
     },
     "scenarios": {
-      "_comment": "operation_scenario is the high-level mode input (per home, or set here as default). 'auto' resolves the mode each cycle from live signals; an explicit value ('normal'|'load_peak_management'|'capacity_management'|'resiliency') overrides detection. Within load_peak_management the control_strategy (mpc|rbc) picks the method; capacity_management and resiliency always shed HVAC by widening the band with the per-scenario offsets below. Offsets are asymmetric per the controller memo (raise cooling, lower heating); °F.",
+      "_comment": "operation_scenario is the high-level mode input (per home, or set here as default). 'auto' resolves the mode each cycle from live signals; an explicit value ('normal'|'load_management_tou'|'load_management_dr'|'load_management_capacity'|'capacity_management'|'resiliency') overrides detection. load_management_dr/capacity_management/resiliency shed HVAC by widening the band with the per-scenario offsets below; load_management_tou and load_management_capacity leave the thermostat at baseline (their action is on the panel battery / circuits). Offsets are asymmetric per the controller memo (raise cooling, lower heating); °F.",
       "auto_detection": {
-        "priority": ["resiliency", "capacity_management", "load_peak_management", "normal"],
+        "priority": ["resiliency", "capacity_management", "load_management_capacity", "load_management_dr", "load_management_tou", "normal"],
         "capacity_trigger_pct": 0.80,
         "capacity_use_forecast": true,
         "capacity_forecast_trigger_pct": 0.80,
         "capacity_forecast_horizon_h": 24,
         "store_forecast": true,
         "service_voltage_v": 240,
+        "capacity_management_design_config": 3,
         "load_peak_event_period_types": ["peak"],
         "load_peak_event_keywords": ["shed", "curtail", "dr"],
         "resiliency_event_keywords": ["outage", "emergency"]
       },
       "normal": { "cool_offset_f": 0.0, "heat_offset_f": 0.0 },
-      "load_peak_management": { "cool_offset_f": 2.0, "heat_offset_f": 2.0 },
+      "load_management_tou": { "cool_offset_f": 0.0, "heat_offset_f": 0.0 },
+      "load_management_dr": { "cool_offset_f": 2.0, "heat_offset_f": 2.0 },
+      "load_management_capacity": { "cool_offset_f": 0.0, "heat_offset_f": 0.0 },
       "capacity_management": { "cool_offset_f": 4.0, "heat_offset_f": 2.0 },
       "resiliency": { "cool_offset_f": 6.0, "heat_offset_f": 4.0 }
     },
@@ -67,17 +70,24 @@
     "load_management": {
       "_comment": "Full-home ILC scenario controller (smart_home_ilc.scenario_plan). The resolved operation_scenario (shared with the HVAC layer) selects a per-scenario EcoFlow Smart Home Panel battery mode below. Circuit shedding is NOT directly controllable via the EcoFlow API -- under 'EPS backup' (epsModeInfo=true) the panel sheds by its own predefined circuit priorities. Advisory/shadow only: logged to control_advisories (controller='ilc', action_type='set_operating_mode'); no device commands are sent.",
       "battery": {
-        "_comment": "EcoFlow Delta Pro Ultra. Reported for context (SOC health); the panel manages source/inverter internally under EPS backup.",
+        "_comment": "EcoFlow Delta Pro Ultra. Reported for context (SOC health); the panel manages source/inverter internally under EPS backup. max_output_w is the per-inverter output cap (7.2 kW); the Scenarios battery-capacity gauge multiplies it by the home's inverter count and warns when operating load reaches capacity_trigger_pct of that total.",
         "max_output_w": 7200,
+        "capacity_trigger_pct": 0.95,
         "min_soc_pct": 20,
         "reserve_soc_pct": 10
       },
+      "circuit_current_limit": {
+        "_comment": "load_management_capacity shed: lower the max input current on non-essential circuits (circuit_priority = 'non_essential') to non_essential_max_input_a (PD303 setAmp) so the panel trips them off, shaving load below the breaker limit. Actuated per-circuit through the dashboard /control/dispatch path; the ILC agent logs the same targets to control_advisories.",
+        "non_essential_max_input_a": 0
+      },
       "scenarios": {
-        "_comment": "Per-scenario panel battery mode. smartBackupMode: 0=off, 1=time_of_use, 2=self_powered, 3=timed (matches the dashboard Savings-mode selector). epsModeInfo: EPS backup on/off (panel sheds by predefined circuit priority when on). load_peak_management has a second mapping (dr_event_battery_mode) used when an actual DR event is active vs. a plain TOU peak-price period.",
-        "normal":               { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false } },
-        "load_peak_management": { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false }, "dr_event_battery_mode": { "smartBackupMode": 2, "epsModeInfo": false } },
-        "capacity_management":  { "battery_mode": { "smartBackupMode": 2, "epsModeInfo": false } },
-        "resiliency":           { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": true } }
+        "_comment": "Per-scenario panel battery mode. smartBackupMode: 0=off, 1=time_of_use, 2=self_powered, 3=timed (matches the dashboard Savings-mode selector). epsModeInfo: EPS backup on/off (panel sheds by predefined circuit priority when on). load_management_tou holds TOU price by running the battery in time_of_use; load_management_dr discharges (self_powered) for a DR event; load_management_capacity sheds non-essential circuits (see circuit_current_limit) with the battery off; capacity_management (design_config 3) runs EPS-on while the external switch islands the panel; resiliency runs EPS-on for a grid outage.",
+        "normal":                   { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false } },
+        "load_management_tou":      { "battery_mode": { "smartBackupMode": 1, "epsModeInfo": false } },
+        "load_management_dr":       { "battery_mode": { "smartBackupMode": 2, "epsModeInfo": false } },
+        "load_management_capacity": { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": false } },
+        "capacity_management":      { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": true } },
+        "resiliency":               { "battery_mode": { "smartBackupMode": 0, "epsModeInfo": true } }
       }
     },
     "load_forecast": {
@@ -89,9 +99,10 @@
     }
   },
   "homes": {
-    "_comment": "Replace these example homes with your real homes. 'device_id' is the thermostat device row in the devices table. 'equipment' is single_stage_ac | vs_heat_pump; 'mode' is cool | heat | both. Comfort bounds are indoor air-temperature limits in Celsius (set heat_* to null for a cool-only home).",
+    "_comment": "Replace these example homes with your real homes. 'device_id' is the thermostat device row in the devices table. 'equipment' is single_stage_ac | vs_heat_pump; 'mode' is cool | heat | both. 'design_config' is the home's hardware design configuration (defaults to defaults.panel.design_configuration when omitted); a home is eligible for the capacity_management scenario only when its design_config matches scenarios.auto_detection.capacity_management_design_config. Comfort bounds are indoor air-temperature limits in Celsius (set heat_* to null for a cool-only home).",
     "example_home_cool": {
       "device_id": 0,
+      "design_config": 2,
       "model_file": "config/hvac_model_example_home_cool.json",
       "equipment": "single_stage_ac",
       "mode": "cool",
@@ -105,6 +116,7 @@
     },
     "example_home_heatpump": {
       "device_id": 0,
+      "design_config": 3,
       "model_file": "config/hvac_model_example_home_heatpump.json",
       "equipment": "vs_heat_pump",
       "mode": "both",

@@ -2,19 +2,24 @@
 Operation-scenario endpoints (Scenarios dashboard page).
 
 The smart-home ILC resolves one operation scenario per home each cycle
-(normal | load_peak_management | capacity_management | resiliency) and logs it
-to control_advisories. This router surfaces that current scenario, lets an
-operator pin a per-day scenario on a calendar (scenario_schedule), and
-dispatches a scenario's operation: the panel battery mode + the thermostat
-band-widen setpoints, reusing the guarded /control/dispatch path so RBAC,
-home-scope, circuit-safety and the VOLTTRON bus all behave identically.
+(normal | load_management_tou | load_management_dr | load_management_capacity |
+capacity_management | resiliency) and logs it to control_advisories. This router
+surfaces that current scenario, lets an operator pin a per-day scenario on a
+calendar (scenario_schedule), and dispatches a scenario's operation: the panel
+battery mode + the thermostat band-widen setpoints, reusing the guarded
+/control/dispatch path so RBAC, home-scope, circuit-safety and the VOLTTRON bus
+all behave identically.
 
 Dispatch resolution comes from mpc_config:
-  - battery mode  <- defaults.load_management.scenarios[scenario].battery_mode
-                     (dr_event_battery_mode when a DR event is active under
-                     load_peak_management),
+  - battery mode  <- defaults.load_management.scenarios[scenario].battery_mode,
   - setpoints     <- baseline_setpoints +/- defaults.scenarios[scenario] offsets
                      (cooling raised, heating lowered).
+
+load_management_capacity additionally sheds each non-essential circuit by capping
+its max input current (PD303 setAmp) via the same guarded dispatch path; normal
+restores those circuits to their breaker rating (or the panel master breaker when
+unrated). Only capacity_management's grid disconnect stays out of band — it is
+performed by an external switch, so that leg is reported but not actuated here.
 """
 
 from __future__ import annotations
@@ -29,8 +34,10 @@ from ..auth import User, _has_home_scope, get_current_user, require_dispatch
 from ..db import db
 from ..models import (
     OPERATION_SCENARIOS,
+    BatteryCapacity,
     DispatchRequest,
     DispatchTarget,
+    PanelCapacity,
     ScenarioCurrent,
     ScenarioDispatchRequest,
     ScenarioDispatchResult,
@@ -53,23 +60,32 @@ def _check_scenario(name: str) -> None:
 
 @router.get("/scenarios/current", response_model=list[ScenarioCurrent])
 async def scenarios_current(user: User = Depends(get_current_user)):
-    """Each accessible home's latest resolved scenario plus today's override."""
+    """Each accessible home's effective scenario. The calendar (scenario_schedule)
+    drives it; a manual dispatch from the Scenarios card overrides the calendar
+    for the day it was issued; with neither scheduled nor dispatched today, the
+    home runs normal."""
     from ..auth import ALL_HOMES_ROLES
 
     sql = """
         SELECT h.home_id, h.home_name,
-               adv.operation_scenario AS adv_scenario, adv.ts AS adv_ts,
-               sch.operation_scenario AS sched_scenario
+               sch.operation_scenario AS sched_scenario,
+               sch.updated_at AS sched_ts,
+               disp.operation_scenario AS disp_scenario,
+               disp.ts AS disp_ts
         FROM homes h
-        LEFT JOIN LATERAL (
-            SELECT operation_scenario, ts
-            FROM control_advisories ca
-            WHERE ca.home_id = h.home_id AND ca.operation_scenario IS NOT NULL
-            ORDER BY ts DESC LIMIT 1
-        ) adv ON TRUE
         LEFT JOIN scenario_schedule sch
             ON sch.home_id = h.home_id
            AND sch.scenario_date = (NOW() AT TIME ZONE h.timezone)::date
+        LEFT JOIN LATERAL (
+            SELECT operation_scenario, ts
+            FROM control_advisories ca
+            WHERE ca.home_id = h.home_id
+              AND ca.scenario_source = 'dispatch'
+              AND ca.operation_scenario IS NOT NULL
+              AND (ca.ts AT TIME ZONE h.timezone)::date
+                  = (NOW() AT TIME ZONE h.timezone)::date
+            ORDER BY ca.ts DESC LIMIT 1
+        ) disp ON TRUE
     """
     if user.role in ALL_HOMES_ROLES:
         rows = await db.fetch(sql + " ORDER BY h.home_id")
@@ -77,17 +93,137 @@ async def scenarios_current(user: User = Depends(get_current_user)):
         rows = await db.fetch(
             sql + " WHERE h.home_id = ANY($1::int[]) ORDER BY h.home_id", user.homes
         )
-    return [
-        ScenarioCurrent(
+
+    out: list[ScenarioCurrent] = []
+    for r in rows:
+        disp_scn, disp_ts = r["disp_scenario"], r["disp_ts"]
+        sched_scn, sched_ts = r["sched_scenario"], r["sched_ts"]
+        # Manual dispatch overrides the calendar when it is the most recent
+        # operator action today; otherwise follow the calendar; else normal.
+        if disp_scn is not None and (sched_ts is None or disp_ts >= sched_ts):
+            current, source, ts = disp_scn, "dispatch", disp_ts
+        elif sched_scn is not None:
+            current, source, ts = sched_scn, "schedule", sched_ts
+        else:
+            current, source, ts = "normal", "default", None
+        out.append(ScenarioCurrent(
             home_id=r["home_id"],
             home_name=r["home_name"],
-            current_scenario=r["adv_scenario"],
-            source="advisory" if r["adv_scenario"] is not None else None,
-            ts=r["adv_ts"],
-            scheduled_scenario=r["sched_scenario"],
-        )
-        for r in rows
-    ]
+            current_scenario=current,
+            source=source,
+            ts=ts,
+            scheduled_scenario=sched_scn,
+        ))
+    return out
+
+
+@router.get("/scenarios/{home_id}/capacity", response_model=PanelCapacity)
+async def scenario_capacity(home_id: int, user: User = Depends(get_current_user)):
+    """Panel breaker capacity vs. live operating load (kW and A), with the
+    near-threshold flag the Scenarios page uses to warn before the panel trips
+    into capacity management."""
+    if not _has_home_scope(user, home_id):
+        raise HTTPException(status_code=403, detail="Home not in scope")
+    if await db.fetchrow("SELECT 1 FROM homes WHERE home_id = $1", home_id) is None:
+        raise HTTPException(status_code=404, detail="Home not found")
+
+    breaker_a, service_v, trigger_pct = _capacity_config()
+    threshold_a = trigger_pct * breaker_a
+
+    row = await db.fetchrow(
+        """SELECT ts, home_load_w FROM smart_panel_readings
+           WHERE home_id = $1 ORDER BY ts DESC LIMIT 1""",
+        home_id,
+    )
+
+    current_w = current_a = current_kw = load_pct = None
+    near = over = False
+    ts = None
+    if row is not None and row["home_load_w"] is not None:
+        current_w = int(round(float(row["home_load_w"])))
+        current_a = round(current_w / service_v, 1)
+        current_kw = round(current_w / 1000.0, 2)
+        load_pct = round(current_a / breaker_a, 3) if breaker_a else None
+        near = current_a >= threshold_a
+        over = current_a >= breaker_a
+        ts = row["ts"]
+
+    return PanelCapacity(
+        home_id=home_id,
+        breaker_a=breaker_a,
+        service_voltage_v=service_v,
+        trigger_pct=trigger_pct,
+        capacity_kw=round(breaker_a * service_v / 1000.0, 2),
+        threshold_a=round(threshold_a, 1),
+        threshold_kw=round(threshold_a * service_v / 1000.0, 2),
+        current_w=current_w,
+        current_a=current_a,
+        current_kw=current_kw,
+        load_pct=load_pct,
+        near_threshold=near,
+        over_capacity=over,
+        ts=ts,
+    )
+
+
+@router.get("/scenarios/{home_id}/battery-capacity", response_model=BatteryCapacity)
+async def scenario_battery_capacity(home_id: int, user: User = Depends(get_current_user)):
+    """Battery inverter output capacity vs. live operating load (kW), with the
+    near-threshold flag the Scenarios page uses to warn when load approaches what
+    the battery inverter(s) can supply during an island/outage."""
+    if not _has_home_scope(user, home_id):
+        raise HTTPException(status_code=403, detail="Home not in scope")
+    if await db.fetchrow("SELECT 1 FROM homes WHERE home_id = $1", home_id) is None:
+        raise HTTPException(status_code=404, detail="Home not found")
+
+    per_inverter_kw = _inverter_capacity_kw()
+    trigger_pct = _battery_trigger_pct()
+    inverter_count = await db.fetchval(
+        """SELECT count(*) FROM devices
+           WHERE home_id = $1 AND device_type = 'battery'""",
+        home_id,
+    ) or 0
+    total_capacity_kw = round(inverter_count * per_inverter_kw, 2)
+    threshold_kw = round(trigger_pct * total_capacity_kw, 2)
+
+    row = await db.fetchrow(
+        """SELECT ts, home_load_w, battery_power_w FROM smart_panel_readings
+           WHERE home_id = $1 ORDER BY ts DESC LIMIT 1""",
+        home_id,
+    )
+
+    current_w = current_kw = batt_w = batt_kw = load_pct = None
+    near = over = False
+    ts = None
+    if row is not None:
+        ts = row["ts"]
+        if row["home_load_w"] is not None:
+            current_w = int(round(float(row["home_load_w"])))
+            current_kw = round(current_w / 1000.0, 2)
+            if total_capacity_kw > 0:
+                load_pct = round(current_kw / total_capacity_kw, 3)
+                near = current_kw >= threshold_kw
+                over = current_kw >= total_capacity_kw
+        if row["battery_power_w"] is not None:
+            batt_w = int(round(float(row["battery_power_w"])))
+            batt_kw = round(batt_w / 1000.0, 2)
+
+    return BatteryCapacity(
+        home_id=home_id,
+        inverter_count=inverter_count,
+        inverter_capacity_kw=round(per_inverter_kw, 2),
+        total_capacity_kw=total_capacity_kw,
+        trigger_pct=trigger_pct,
+        threshold_kw=threshold_kw,
+        current_load_w=current_w,
+        current_load_kw=current_kw,
+        battery_power_w=batt_w,
+        battery_power_kw=batt_kw,
+        load_pct=load_pct,
+        near_threshold=near,
+        over_capacity=over,
+        ts=ts,
+    )
 
 
 @router.get("/scenarios/schedule", response_model=list[ScenarioScheduleEntry])
@@ -164,24 +300,76 @@ async def _dr_event_active() -> bool:
     return any(w0 <= now < w1 for w0, w1 in windows)
 
 
-def _battery_params(scenario: str, dr_active: bool) -> tuple[dict, bool]:
-    """(panel params, used_dr_mapping) for the scenario from mpc_config."""
+def _battery_params(scenario: str) -> dict:
+    """Panel battery params (smartBackupMode + epsModeInfo) for the scenario from
+    mpc_config. Each scenario carries a single battery_mode mapping."""
     cfg = control._mpc_config()
     scn = (((cfg.get("defaults") or {}).get("load_management") or {})
            .get("scenarios") or {}).get(scenario, {})
-    use_dr = (
-        scenario == "load_peak_management"
-        and dr_active
-        and scn.get("dr_event_battery_mode") is not None
-    )
-    mode = scn.get("dr_event_battery_mode" if use_dr else "battery_mode") or {}
+    mode = scn.get("battery_mode") or {}
+    return {
+        "smartBackupMode": int(mode.get("smartBackupMode", 0)),
+        "epsModeInfo": bool(mode.get("epsModeInfo", False)),
+    }
+
+
+def _circuit_limit_amp() -> int:
+    """Max input current (A) non-essential circuits are capped to when shedding,
+    from mpc_config defaults.load_management.circuit_current_limit (default 0 =
+    fully off)."""
+    cfg = control._mpc_config()
+    ccl = (((cfg.get("defaults") or {}).get("load_management") or {})
+           .get("circuit_current_limit") or {})
+    return int(ccl.get("non_essential_max_input_a", 0))
+
+
+def _panel_main_breaker_amp() -> int:
+    """Panel master breaker amperage from mpc_config defaults.panel (default 60),
+    used as the restore target for circuits with no rated_amps on record."""
+    cfg = control._mpc_config()
+    panel = ((cfg.get("defaults") or {}).get("panel") or {})
+    return int(panel.get("main_breaker_a", 60))
+
+
+def _circuit_restore_amp(rated_amps) -> int:
+    """Max input current (A) to restore a non-essential circuit to when the home
+    returns to normal: its breaker rating if known, else the panel master
+    breaker. Clamped to the 0-60 A setAmp range the panel accepts."""
+    amp = int(rated_amps) if rated_amps is not None else _panel_main_breaker_amp()
+    return max(0, min(amp, 60))
+
+
+def _capacity_config() -> tuple[float, float, float]:
+    """(breaker_a, service_voltage_v, trigger_pct) for the panel capacity gauge,
+    read from the same mpc_config keys the ILC capacity supervisor uses so the
+    dashboard threshold matches the controller's."""
+    cfg = control._mpc_config()
+    defaults = cfg.get("defaults") or {}
+    panel = defaults.get("panel") or {}
+    auto = ((defaults.get("scenarios") or {}).get("auto_detection") or {})
     return (
-        {
-            "smartBackupMode": int(mode.get("smartBackupMode", 0)),
-            "epsModeInfo": bool(mode.get("epsModeInfo", False)),
-        },
-        use_dr,
+        float(panel.get("main_breaker_a", 60)),
+        float(auto.get("service_voltage_v", 240)),
+        float(auto.get("capacity_trigger_pct", 0.80)),
     )
+
+
+def _battery_cfg() -> dict:
+    cfg = control._mpc_config()
+    return (((cfg.get("defaults") or {}).get("load_management") or {})
+            .get("battery") or {})
+
+
+def _inverter_capacity_kw() -> float:
+    """Per-inverter max output (kW) from mpc_config
+    defaults.load_management.battery.max_output_w (default 7200 W = 7.2 kW)."""
+    return float(_battery_cfg().get("max_output_w", 7200)) / 1000.0
+
+
+def _battery_trigger_pct() -> float:
+    """Near-limit threshold for the battery inverter gauge from mpc_config
+    defaults.load_management.battery.capacity_trigger_pct (default 0.95)."""
+    return float(_battery_cfg().get("capacity_trigger_pct", 0.95))
 
 
 def _setpoint_params(home_name: str, scenario: str) -> dict:
@@ -223,7 +411,7 @@ async def dispatch_scenario(
     steps: list[ScenarioDispatchStep] = []
 
     # 1. Panel battery mode (Savings mode + EPS backup) for the scenario.
-    battery_params, _used_dr = _battery_params(req.operation_scenario, dr_active)
+    battery_params = _battery_params(req.operation_scenario)
     try:
         resp = await control.dispatch(
             DispatchRequest(
@@ -273,6 +461,110 @@ async def dispatch_scenario(
                 kind="thermostat", status="skipped",
                 detail=str(e.detail), params=setpoint_params,
             ))
+
+    # 3a. load_management_capacity sheds non-essential circuits by capping each
+    #     one's max input current so the panel trips it off. One guarded
+    #     /control/dispatch curtail per circuit, so RBAC/home-scope/circuit-safety
+    #     all apply and each circuit gets its own control_actions row.
+    if req.operation_scenario == "load_management_capacity":
+        floor_a = _circuit_limit_amp()
+        circuits = await db.fetch(
+            """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name
+               FROM panel_circuits pc
+               JOIN devices d ON d.device_id = pc.device_id
+               WHERE d.home_id = $1
+                 AND pc.circuit_priority = 'non_essential'
+                 AND pc.is_controllable = TRUE AND pc.is_critical = FALSE
+               ORDER BY pc.channel_num""",
+            req.home_id,
+        )
+        if not circuits:
+            steps.append(ScenarioDispatchStep(
+                kind="circuit_current_limit", status="skipped",
+                detail="No non-essential controllable circuits to shed for this home.",
+            ))
+        for c in circuits:
+            cparams = {"max_input_a": floor_a}
+            label = c["circuit_name"] or f"Circuit {c['channel_num']}"
+            try:
+                resp = await control.dispatch(
+                    DispatchRequest(
+                        home_id=req.home_id,
+                        action_type="curtail",
+                        target=DispatchTarget(kind="circuit", circuit_id=c["circuit_id"]),
+                        params=cparams,
+                    ),
+                    user,
+                )
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", action_id=resp.action_id,
+                    status=resp.status, params=cparams,
+                    detail=f"{label}: cap max input current at {floor_a}A.",
+                ))
+            except HTTPException as e:
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", status="skipped",
+                    detail=f"{label}: {e.detail}", params=cparams,
+                ))
+    # 3b. normal restores each non-essential circuit's max input current to its
+    #     breaker rating (or the panel master breaker when unrated), undoing a
+    #     prior load_management_capacity shed. Same guarded per-circuit dispatch.
+    elif req.operation_scenario == "normal":
+        circuits = await db.fetch(
+            """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name, pc.rated_amps
+               FROM panel_circuits pc
+               JOIN devices d ON d.device_id = pc.device_id
+               WHERE d.home_id = $1
+                 AND pc.circuit_priority = 'non_essential'
+                 AND pc.is_controllable = TRUE AND pc.is_critical = FALSE
+               ORDER BY pc.channel_num""",
+            req.home_id,
+        )
+        if not circuits:
+            steps.append(ScenarioDispatchStep(
+                kind="circuit_current_limit", status="skipped",
+                detail="No non-essential controllable circuits to restore for this home.",
+            ))
+        for c in circuits:
+            restore_a = _circuit_restore_amp(c["rated_amps"])
+            cparams = {"max_input_a": restore_a}
+            label = c["circuit_name"] or f"Circuit {c['channel_num']}"
+            try:
+                resp = await control.dispatch(
+                    DispatchRequest(
+                        home_id=req.home_id,
+                        action_type="release",
+                        target=DispatchTarget(kind="circuit", circuit_id=c["circuit_id"]),
+                        params=cparams,
+                    ),
+                    user,
+                )
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", action_id=resp.action_id,
+                    status=resp.status, params=cparams,
+                    detail=f"{label}: restore max input current to {restore_a}A.",
+                ))
+            except HTTPException as e:
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", status="skipped",
+                    detail=f"{label}: {e.detail}", params=cparams,
+                ))
+    elif req.operation_scenario == "capacity_management":
+        steps.append(ScenarioDispatchStep(
+            kind="grid_disconnect", status="external",
+            detail="Grid disconnect is performed by the external capacity switch "
+                   "(out of scope); the panel auto-islands and runs EPS-on.",
+        ))
+
+    # Record the dispatched scenario so /scenarios/current reflects it
+    # immediately. shadow_mode=False: this dispatch issued real device commands.
+    await db.execute(
+        """INSERT INTO control_advisories
+               (home_id, controller, action_type, triggered_by,
+                operation_scenario, scenario_source, shadow_mode)
+           VALUES ($1, 'ilc', 'set_operating_mode', 'manual', $2, 'dispatch', FALSE)""",
+        req.home_id, req.operation_scenario,
+    )
 
     return ScenarioDispatchResult(
         home_id=req.home_id,

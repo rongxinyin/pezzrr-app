@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS scenario_schedule (
     scenario_date      DATE         NOT NULL,
     operation_scenario VARCHAR(40)  NOT NULL
         CHECK (operation_scenario IN
-               ('normal','load_peak_management','capacity_management','resiliency')),
+               ('normal','load_management_tou','load_management_dr',
+                'load_management_capacity','capacity_management','resiliency')),
     note               TEXT,
     created_by         VARCHAR(80),                       -- dashboard username that set it
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS scenario_schedule (
 );
 
 COMMENT ON TABLE  scenario_schedule IS 'Operator-set per-home, per-day operation scenario for the smart-home ILC. Drives the Scenarios dashboard calendar; an explicit override of the controller auto-detection for that day.';
-COMMENT ON COLUMN scenario_schedule.operation_scenario IS 'normal | load_peak_management | capacity_management | resiliency';
+COMMENT ON COLUMN scenario_schedule.operation_scenario IS 'normal | load_management_tou | load_management_dr | load_management_capacity | capacity_management | resiliency';
 COMMENT ON COLUMN scenario_schedule.created_by IS 'Dashboard username that set / last updated the entry.';
 
 CREATE INDEX IF NOT EXISTS idx_scenario_sched_home_date

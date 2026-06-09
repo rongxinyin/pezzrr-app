@@ -272,6 +272,32 @@ class EcoFlowAgent(Agent):
             raise RuntimeError(out.get("message", "EcoFlow panel-mode write failed"))
         return out
 
+    def set_circuit_amp(self, device_sn, channel_num, set_amp):
+        """Set the max input current (0–60 A) for one SHP2 branch via PD303_APP_SET.
+
+        channel_num is the 1-based panel channel; the param mirrors the quota
+        tree (loadIncreInfo.hall1IncreInfo.ch{N}Info.setAmp). Lowering setAmp
+        below a circuit's draw trips it off — how the capacity scenario sheds a
+        non-essential circuit. Raises on a non-zero EcoFlow code.
+        """
+        import random
+        if not (1 <= int(channel_num) <= 12):
+            raise ValueError(f"channel_num must be 1–12, got {channel_num!r}")
+        amp = int(set_amp)
+        if not (0 <= amp <= 60):
+            raise ValueError(f"set_amp={set_amp!r} out of range (0–60 A)")
+        out = self._signed_quota_put({
+            "sn": device_sn,
+            "id": random.randint(100000000, 999999999),
+            "version": "1.0",
+            "cmdCode": "PD303_APP_SET",
+            "params": {"loadIncreInfo": {"hall1IncreInfo": {
+                f"ch{int(channel_num)}Info": {"setAmp": amp}}}},
+        })
+        if str(out.get("code")) != "0":
+            raise RuntimeError(out.get("message", "EcoFlow setAmp write failed"))
+        return out
+
     def make_api_request(self, method, endpoint, params=None, data=None):
         """Make authenticated API request to EcoFlow"""
         try:
@@ -780,6 +806,11 @@ class EcoFlowAgent(Agent):
     def set_panel_mode_rpc(self, device_sn, params):
         """RPC: set SHP2 panel operating-mode params (PD303_APP_SET signed PUT)."""
         return self.set_panel_mode(device_sn, params)
+
+    @RPC.export
+    def set_circuit_amp_rpc(self, device_sn, channel_num, set_amp):
+        """RPC: cap a SHP2 branch's max input current (PD303_APP_SET signed PUT)."""
+        return self.set_circuit_amp(device_sn, channel_num, set_amp)
 
     @RPC.export
     def get_battery_info(self, device_sn):

@@ -205,7 +205,9 @@ export interface SetpointPlan {
 // =====================================================================
 export type OperationScenario =
   | 'normal'
-  | 'load_peak_management'
+  | 'load_management_tou'
+  | 'load_management_dr'
+  | 'load_management_capacity'
   | 'capacity_management'
   | 'resiliency'
 
@@ -240,6 +242,40 @@ export interface ScenarioDispatchResult {
   operation_scenario: OperationScenario
   dr_event_active: boolean
   steps: ScenarioDispatchStep[]
+}
+
+export interface PanelCapacity {
+  home_id: number
+  breaker_a: number
+  service_voltage_v: number
+  trigger_pct: number
+  capacity_kw: number
+  threshold_a: number
+  threshold_kw: number
+  current_w: number | null
+  current_a: number | null
+  current_kw: number | null
+  load_pct: number | null
+  near_threshold: boolean
+  over_capacity: boolean
+  ts: string | null
+}
+
+export interface BatteryCapacity {
+  home_id: number
+  inverter_count: number
+  inverter_capacity_kw: number
+  total_capacity_kw: number
+  trigger_pct: number
+  threshold_kw: number
+  current_load_w: number | null
+  current_load_kw: number | null
+  battery_power_w: number | null
+  battery_power_kw: number | null
+  load_pct: number | null
+  near_threshold: boolean
+  over_capacity: boolean
+  ts: string | null
 }
 
 // =====================================================================

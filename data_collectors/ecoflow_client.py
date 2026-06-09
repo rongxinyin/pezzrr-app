@@ -199,6 +199,47 @@ class EcoFlowClient:
             "params": params,
         })
 
+    # Per-branch max input current (SHP2 loadIncreInfo.ch#Info.setAmp). 0 A cuts
+    # the branch (used to shed a non-essential circuit); the panel trips the
+    # channel off below its draw. Upper bound is the 60 A panel master breaker
+    # (masterCur); real branches read 15–60 A. (EcoFlow dev doc PP4 lists 0–30
+    # for some variants, but this panel accepts up to 60.)
+    _SET_AMP_MIN = 0
+    _SET_AMP_MAX = 60
+
+    def set_circuit_amp(self, channel_num, set_amp, sn=None):
+        """Set the maximum input current (0–60 A) for one SHP2 branch via
+        PD303_APP_SET.
+
+        channel_num is the 1-based panel channel (1–12); the param mirrors the
+        quota tree (loadIncreInfo.hall1IncreInfo.ch{N}Info.setAmp). Lowering
+        setAmp below a circuit's draw trips it off, which is how the capacity
+        scenario sheds non-essential circuits. Range-checked before the write so
+        a bad value never reaches a real panel.
+        """
+        if not (1 <= int(channel_num) <= 12):
+            raise ValueError(f"channel_num must be 1–12, got {channel_num!r}")
+        amp = int(set_amp)
+        if not (self._SET_AMP_MIN <= amp <= self._SET_AMP_MAX):
+            raise ValueError(
+                f"set_amp={set_amp!r} out of range "
+                f"({self._SET_AMP_MIN}–{self._SET_AMP_MAX} A)"
+            )
+        sn = sn or self.device_sn
+        return self.set_quota_raw({
+            "sn": sn,
+            "id": random.randint(100000000, 999999999),
+            "version": "1.0",
+            "cmdCode": "PD303_APP_SET",
+            "params": {
+                "loadIncreInfo": {
+                    "hall1IncreInfo": {
+                        f"ch{int(channel_num)}Info": {"setAmp": amp},
+                    },
+                },
+            },
+        })
+
     def get_device_quota(self, sn=None):
         """Fetch all quota data for the SHP2."""
         sn = sn or self.device_sn

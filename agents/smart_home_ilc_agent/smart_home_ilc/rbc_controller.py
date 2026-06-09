@@ -85,7 +85,7 @@ def _event_brief(ev):
 # Setpoint relaxation (band widening)
 # =====================================================================
 def relax_setpoints(home_name, cool_offset_f, heat_offset_f, mpc_cfg=None,
-                    now_utc=None, conn=None, scenario="load_peak_management",
+                    now_utc=None, conn=None, scenario="load_management_dr",
                     triggered_by="DR_event", active_events_brief=None):
     """Widen the thermostat band unconditionally by the given offsets.
 
@@ -192,7 +192,7 @@ def compute_rbc(home_name, mpc_cfg=None, now_utc=None, conn=None):
         c, h = (cool_off, heat_off) if event_active else (0.0, 0.0)
         res = relax_setpoints(
             home_name, c, h, mpc_cfg=mpc_cfg, now_utc=now_utc, conn=conn,
-            scenario="load_peak_management",
+            scenario="load_management_dr",
             triggered_by=rbc_cfg.get("triggered_by", "DR_event"),
             active_events_brief=brief)
         res["event_active"] = event_active

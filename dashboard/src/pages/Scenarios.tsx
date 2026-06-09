@@ -10,11 +10,13 @@ import { apiFetch, ApiError } from '../lib/api'
 import { useAuthStore } from '../store/auth'
 import { SCENARIOS, SCENARIO_LABEL, scenarioLabel, scenarioStatus } from '../lib/scenarios'
 import type {
+  BatteryCapacity,
   DrEvent,
   DrParticipant,
   OpenAdrPrice,
   OpenAdrPricePoint,
   OperationScenario,
+  PanelCapacity,
   ScenarioCurrent,
   ScenarioDispatchResult,
 } from '../lib/types'
@@ -64,6 +66,7 @@ export function Scenarios() {
       {selectedHome && (
         <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: 16 }}>
           <CurrentScenarioCard home={selectedHome} canEdit={canEdit} />
+          {homeId != null && <CapacityCard homeId={homeId} />}
           {homeId != null && <ScenarioCalendar homeId={homeId} canEdit={canEdit} />}
         </div>
       )}
@@ -116,7 +119,6 @@ function CurrentScenarioCard({ home, canEdit }: { home: ScenarioCurrent; canEdit
         <Badge status={scenarioStatus(home.current_scenario)}>
           {scenarioLabel(home.current_scenario)}
         </Badge>
-        {home.source && <span className="text-[12px] text-text-faint">{home.source}</span>}
         {home.ts && (
           <span className="text-[12px] text-text-faint">
             {new Date(home.ts).toLocaleString([], {
@@ -129,10 +131,7 @@ function CurrentScenarioCard({ home, canEdit }: { home: ScenarioCurrent; canEdit
         )}
       </div>
 
-      <MetricGrid cols={2}>
-        <MetricTile label="Resolved (controller)" value={scenarioLabel(home.current_scenario)} />
-        <MetricTile label="Scheduled today" value={scenarioLabel(home.scheduled_scenario)} />
-      </MetricGrid>
+      <MetricTile label="Scheduled today" value={scenarioLabel(home.scheduled_scenario)} />
 
       {canEdit && (
         <div className="mt-4" style={{ borderTop: '0.5px solid var(--border)', paddingTop: 12 }}>
@@ -197,6 +196,175 @@ const STEP_STATUS: Record<string, Status> = {
   acknowledged: 'info',
   failed: 'act',
   skipped: 'offline',
+}
+
+function capacityStatus(over: boolean, near: boolean): { status: Status; color: string } {
+  if (over) return { status: 'act', color: 'var(--act)' }
+  if (near) return { status: 'watch', color: 'var(--watch)' }
+  return { status: 'ok', color: 'var(--ok)' }
+}
+
+// Shared load bar: fill scaled to loadPct, a tick at the warn threshold, and
+// three edge labels (start / threshold / full scale).
+function CapacityBar({
+  loadPct,
+  triggerPct,
+  color,
+  left,
+  mid,
+  right,
+}: {
+  loadPct: number
+  triggerPct: number
+  color: string
+  left: string
+  mid: string
+  right: string
+}) {
+  const barPct = Math.min(loadPct * 100, 100)
+  const tickPct = Math.min(triggerPct * 100, 100)
+  return (
+    <div className="mt-3">
+      <div className="relative h-2 rounded-full" style={{ background: 'var(--bg-subtle)' }}>
+        <div className="absolute left-0 top-0 h-2 rounded-full" style={{ width: `${barPct}%`, background: color }} />
+        <div className="absolute" style={{ left: `${tickPct}%`, top: -3, height: 14, width: 2, background: 'var(--text-faint)' }} />
+      </div>
+      <div className="mt-1 flex justify-between text-[11px] text-text-faint">
+        <span>{left}</span>
+        <span>{mid}</span>
+        <span>{right}</span>
+      </div>
+    </div>
+  )
+}
+
+function PanelCapacitySection({ cap }: { cap: PanelCapacity }) {
+  const loadPct = cap.load_pct ?? 0
+  const { status, color } = capacityStatus(cap.over_capacity, cap.near_threshold)
+  const statusLabel = cap.over_capacity ? 'over capacity' : cap.near_threshold ? 'near limit' : 'within limits'
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[13px] font-medium text-text">Panel</span>
+        <Badge status={status}>{statusLabel}</Badge>
+        <span className="text-[12px] text-text-faint">
+          {cap.current_a == null ? 'no reading' : `${Math.round(loadPct * 100)}% of ${cap.breaker_a} A breaker`}
+        </span>
+      </div>
+
+      <MetricGrid cols={2}>
+        <MetricTile
+          label="Operating load"
+          value={cap.current_kw == null ? '—' : cap.current_kw.toFixed(2)}
+          unit={cap.current_kw == null ? undefined : `kW · ${cap.current_a} A`}
+        />
+        <MetricTile
+          label="Breaker capacity"
+          value={cap.capacity_kw.toFixed(1)}
+          unit={`kW · ${cap.breaker_a} A`}
+        />
+      </MetricGrid>
+
+      <CapacityBar
+        loadPct={loadPct}
+        triggerPct={cap.trigger_pct}
+        color={color}
+        left="0"
+        mid={`trip ${cap.threshold_a} A · ${cap.threshold_kw} kW (${Math.round(cap.trigger_pct * 100)}%)`}
+        right={`${cap.breaker_a} A`}
+      />
+    </div>
+  )
+}
+
+function BatteryCapacitySection({ cap }: { cap: BatteryCapacity }) {
+  const loadPct = cap.load_pct ?? 0
+  const { status, color } = capacityStatus(cap.over_capacity, cap.near_threshold)
+  const statusLabel = cap.over_capacity ? 'over inverter capacity' : cap.near_threshold ? 'near inverter limit' : 'within inverter limits'
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[13px] font-medium text-text">Battery inverter</span>
+        <Badge status={status}>{statusLabel}</Badge>
+        <span className="text-[12px] text-text-faint">
+          {cap.inverter_count === 0
+            ? 'no battery inverter'
+            : cap.current_load_kw == null
+              ? 'no reading'
+              : `${Math.round(loadPct * 100)}% of ${cap.inverter_count}×${cap.inverter_capacity_kw} kW`}
+        </span>
+      </div>
+
+      <MetricGrid cols={2}>
+        <MetricTile
+          label="Operating load"
+          value={cap.current_load_kw == null ? '—' : cap.current_load_kw.toFixed(2)}
+          unit={cap.current_load_kw == null ? undefined : 'kW'}
+        />
+        <MetricTile
+          label="Inverter capacity"
+          value={cap.total_capacity_kw.toFixed(1)}
+          unit={`kW · ${cap.inverter_count}×${cap.inverter_capacity_kw} kW`}
+        />
+        <MetricTile
+          label="Battery output"
+          value={cap.battery_power_kw == null ? '—' : cap.battery_power_kw.toFixed(2)}
+          unit={cap.battery_power_kw == null ? undefined : 'kW'}
+        />
+        <MetricTile
+          label="Headroom"
+          value={cap.current_load_kw == null ? '—' : (cap.total_capacity_kw - cap.current_load_kw).toFixed(2)}
+          unit={cap.current_load_kw == null ? undefined : 'kW'}
+        />
+      </MetricGrid>
+
+      <CapacityBar
+        loadPct={loadPct}
+        triggerPct={cap.trigger_pct}
+        color={color}
+        left="0"
+        mid={`limit ${cap.threshold_kw} kW (${Math.round(cap.trigger_pct * 100)}%)`}
+        right={`${cap.total_capacity_kw} kW`}
+      />
+    </div>
+  )
+}
+
+function CapacityCard({ homeId }: { homeId: number }) {
+  const panelQ = useQuery({
+    queryKey: ['scenario-capacity', homeId],
+    queryFn: () => apiFetch<PanelCapacity>(`/scenarios/${homeId}/capacity`),
+    refetchInterval: 30_000,
+  })
+  const batteryQ = useQuery({
+    queryKey: ['battery-capacity', homeId],
+    queryFn: () => apiFetch<BatteryCapacity>(`/scenarios/${homeId}/battery-capacity`),
+    refetchInterval: 30_000,
+  })
+
+  return (
+    <Card title="Capacity">
+      {panelQ.isLoading ? (
+        <div className="text-[13px] text-text-muted">Loading panel…</div>
+      ) : panelQ.error || !panelQ.data ? (
+        <div className="text-[13px] text-act">Failed to load panel capacity.</div>
+      ) : (
+        <PanelCapacitySection cap={panelQ.data} />
+      )}
+
+      <div className="my-4" style={{ borderTop: '0.5px solid var(--border)' }} />
+
+      {batteryQ.isLoading ? (
+        <div className="text-[13px] text-text-muted">Loading battery…</div>
+      ) : batteryQ.error || !batteryQ.data ? (
+        <div className="text-[13px] text-act">Failed to load battery capacity.</div>
+      ) : (
+        <BatteryCapacitySection cap={batteryQ.data} />
+      )}
+    </Card>
+  )
 }
 
 // =====================================================================

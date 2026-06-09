@@ -1,24 +1,31 @@
 """
 Operation-scenario supervisor for the thermostat HVAC controllers.
 
-`operation_scenario` is the high-level mode input for a home (Controller Memo,
-design configuration #2). It sits above the per-home control_strategy (mpc|rbc)
-and decides *what the home should be doing* this cycle; the strategy decides
-*how*. Four live scenarios:
+`operation_scenario` is the high-level mode input for a home (Controller Memo).
+It sits above the per-home control_strategy (mpc|rbc) and decides *what the home
+should be doing* this cycle; the strategy decides *how*. Six live scenarios:
 
-    normal               - no shed. MPC homes optimize cost; RBC homes hold baseline.
-    load_peak_management - a DR / peak-price event is active. MPC homes optimize
-                           against the event price; RBC homes widen the band.
-    capacity_management  - panel load is near the 60A main-breaker limit
-                           (present amperage >= capacity_trigger_pct), OR the
-                           home-load forecast anticipates a breach within the
-                           lookahead window. All homes widen the band.
-    resiliency           - grid outage / EPS mode. All homes widen the band hard.
+    normal                   - no shed. MPC homes optimize cost; RBC homes hold baseline.
+    load_management_tou      - a TOU peak-price period is active (no DR event).
+                               Thermostat held at baseline; the panel runs the
+                               battery in time_of_use to shave the price peak.
+    load_management_dr       - a DR event is active. Widen the band and discharge
+                               the battery (self_powered).
+    load_management_capacity - panel load is near the main-breaker limit
+                               (present amperage >= capacity_trigger_pct, or a
+                               forecast breach within the lookahead). Shed
+                               non-essential circuits; thermostat held at baseline.
+    capacity_management      - a design_config-3 home whose panel has been islanded
+                               by the external capacity switch (grid offline). Widen
+                               the band and run EPS-on. The disconnect itself is out
+                               of scope (an external switch); we only detect it.
+    resiliency               - grid outage / EPS mode (any home). Widen hard, EPS-on.
 
 The scenario is either set explicitly (per-home `operation_scenario`, or the
 `defaults.operation_scenario`) or, when that is "auto", resolved each cycle from
 live signals (panel telemetry + active OpenADR events) by priority:
-resiliency > capacity_management > load_peak_management > normal.
+resiliency > capacity_management > load_management_capacity > load_management_dr
+> load_management_tou > normal.
 
 `scenario_action(scenario, strategy)` maps a resolved scenario to a concrete
 action for one home -- "mpc", "band_widen", or "baseline" -- and the action set
@@ -58,12 +65,20 @@ ACTION_BASELINE = "baseline"
 # trigger_source_enum value to stamp on the logged action, per scenario.
 SCENARIO_TRIGGERED_BY = {
     "normal": "ILC_agent",
-    "load_peak_management": "DR_event",
-    "capacity_management": "ILC_agent",
+    "load_management_tou": "ILC_agent",
+    "load_management_dr": "DR_event",
+    "load_management_capacity": "ILC_agent",
+    "capacity_management": "safety",
     "resiliency": "safety",
 }
 
-DEFAULT_PRIORITY = ["resiliency", "capacity_management", "load_peak_management", "normal"]
+DEFAULT_PRIORITY = [
+    "resiliency", "capacity_management", "load_management_capacity",
+    "load_management_dr", "load_management_tou", "normal",
+]
+
+# Scenarios whose thermostat action is always a band-widen (vs. holding baseline).
+BAND_WIDEN_SCENARIOS = ("load_management_dr", "capacity_management", "resiliency")
 
 
 # =====================================================================
@@ -186,14 +201,21 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
     peak_pts = auto.get("load_peak_event_period_types", ["peak"])
     peak_kw = auto.get("load_peak_event_keywords", ["shed", "curtail", "dr"])
 
+    # A design_config-3 home is islanded by the external capacity switch, so an
+    # offline grid resolves to capacity_management (not resiliency) for it.
+    cap_design_config = auto.get("capacity_management_design_config", 3)
+    home_design_config = hc.get("design_config",
+                                defaults.get("panel", {}).get("design_configuration"))
+    is_capacity_home = (home_design_config is not None
+                        and home_design_config == cap_design_config)
+
     outage = _outage(panel)
     resil_event = any(_event_matches(e, [], resil_kw) for e in evs)
-    peak_event = any(_event_matches(e, peak_pts, peak_kw) for e in evs)
-    # A DR event is an event matched by name/program keyword (shed/curtail/dr),
-    # distinct from a plain TOU peak-price *period* (matched by period_type).
-    # The scenario_plan battery policy differs between the two within
-    # load_peak_management, so surface DR separately.
+    # A DR event is matched by name/program keyword (shed/curtail/dr); a plain TOU
+    # peak-price period is matched by period_type alone. They drive different
+    # scenarios (load_management_dr vs load_management_tou), so keep them separate.
     dr_event = any(_event_matches(e, [], peak_kw) for e in evs)
+    peak_period = any(_event_matches(e, peak_pts, []) for e in evs)
     over_capacity_now = amps is not None and amps >= trip_a
 
     # Home-load forecast, built once per cycle, then optionally persisted and/or
@@ -232,22 +254,31 @@ def resolve_scenario(home_name, cfg, conn, now_utc=None):
         "forecast_breach": bool(fc_breach),
         "grid_outage": outage,
         "resiliency_event": resil_event,
-        "peak_event": peak_event,
+        "peak_period": peak_period,
         "dr_event": dr_event,
+        "design_config": home_design_config,
+        "is_capacity_home": is_capacity_home,
         "n_events_overlapping": len(evs),
     }
 
     if over_capacity_now:
-        cap_reason = f"home load {signals['estimated_amps']}A >= {signals['capacity_trip_a']}A"
+        cap_load_reason = f"home load {signals['estimated_amps']}A >= {signals['capacity_trip_a']}A"
     else:
-        cap_reason = (f"forecast peak {signals['forecast_peak_amps']}A >= "
-                      f"{signals['forecast_trip_a']}A at {fc_when}")
+        cap_load_reason = (f"forecast peak {signals['forecast_peak_amps']}A >= "
+                           f"{signals['forecast_trip_a']}A at {fc_when}")
 
+    # capacity_management is the external-switch island case for a design_config-3
+    # home; load_management_capacity is the load-threshold shed for every other
+    # home. resiliency claims an offline grid only for non-capacity homes.
     detections = {
-        "resiliency": (outage or resil_event,
+        "resiliency": (resil_event or (outage and not is_capacity_home),
                        "grid outage / EPS mode" if outage else "resiliency event active"),
-        "capacity_management": (over_capacity, cap_reason),
-        "load_peak_management": (peak_event, "DR / peak-price event active"),
+        "capacity_management": (is_capacity_home and outage,
+                                "design_config-3 panel islanded (grid offline)"),
+        "load_management_capacity": (over_capacity, cap_load_reason),
+        "load_management_dr": (dr_event, "DR event active"),
+        "load_management_tou": (peak_period and not dr_event,
+                                "TOU peak-price period active"),
         "normal": (True, "no shed signal"),
     }
 
@@ -269,11 +300,10 @@ def scenario_action(scenario, strategy):
     Returns 'mpc', 'band_widen', or 'baseline'. The set partitions so the MPC
     periodic owns 'mpc' and the RBC periodic owns 'band_widen'/'baseline'."""
     strategy = (strategy or "mpc").lower()
-    if scenario in ("capacity_management", "resiliency"):
+    if scenario in BAND_WIDEN_SCENARIOS:
         return ACTION_BAND_WIDEN  # always shed, regardless of strategy
-    if scenario == "load_peak_management":
-        return ACTION_MPC if strategy == "mpc" else ACTION_BAND_WIDEN
-    # normal
+    # normal, load_management_tou, load_management_capacity: thermostat at
+    # baseline (these scenarios act on the battery / circuits, not the band).
     return ACTION_MPC if strategy == "mpc" else ACTION_BASELINE
 
 

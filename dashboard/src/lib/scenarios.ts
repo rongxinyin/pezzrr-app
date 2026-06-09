@@ -1,28 +1,34 @@
 import type { Status } from '../components/status'
 import type { OperationScenario } from './types'
 
-// The four operation scenarios the smart-home ILC resolves, in escalation
+// The six operation scenarios the smart-home ILC resolves, in escalation
 // order. Labels + status colors are shared by the Scenarios page, the calendar
 // and the current-scenario card so a scenario always reads the same everywhere.
 export const SCENARIOS: OperationScenario[] = [
   'normal',
-  'load_peak_management',
+  'load_management_tou',
+  'load_management_dr',
+  'load_management_capacity',
   'capacity_management',
   'resiliency',
 ]
 
 export const SCENARIO_LABEL: Record<OperationScenario, string> = {
   normal: 'Normal',
-  load_peak_management: 'Load peak',
-  capacity_management: 'Capacity',
+  load_management_tou: 'TOU peak',
+  load_management_dr: 'DR event',
+  load_management_capacity: 'Capacity',
+  capacity_management: 'Islanded',
   resiliency: 'Resiliency',
 }
 
-// Distinct colors across the status palette: normal=green, load peak=amber,
-// capacity=red, resiliency=blue.
+// Status palette (only four colors): normal=green; the two load-shift
+// scenarios (TOU, DR)=amber; the two capacity scenarios=red; resiliency=blue.
 export const SCENARIO_STATUS: Record<OperationScenario, Status> = {
   normal: 'ok',
-  load_peak_management: 'watch',
+  load_management_tou: 'watch',
+  load_management_dr: 'watch',
+  load_management_capacity: 'act',
   capacity_management: 'act',
   resiliency: 'info',
 }

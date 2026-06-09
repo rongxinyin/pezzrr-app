@@ -12,16 +12,22 @@ mode: when EPS backup is on, the panel sheds circuits by its own predefined
 circuit priorities. The central controller therefore drives the panel BATTERY
 MODE (Savings mode + EPS backup), not individual circuits:
 
-    normal                - Savings mode off, EPS backup off. Grid source,
-                            thermostat at MPC/baseline.
-    load_peak_management  - peak-price period: Savings off, EPS off (MPC
-      (DR / peak price)     optimizes cost / RBC widens band; battery untouched).
-                            DR event period: Savings 'self-powered' on, EPS off.
-    capacity_management   - whole-home load near the main-breaker limit. Savings
-      (over threshold)      'self-powered' on, EPS off; widen the thermostat band.
-    resiliency            - grid outage / PSPS. EPS backup on (the panel sheds
-      (no grid / PSPS)      non-critical circuits by predefined priority), Savings
-                            off; hard-widen the thermostat.
+    normal                   - Savings mode off, EPS backup off. Grid source,
+                               thermostat at MPC/baseline.
+    load_management_tou      - TOU peak-price period (no DR): Savings 'time_of_use'
+      (TOU peak price)         on, EPS off; thermostat at baseline.
+    load_management_dr       - DR event active: Savings 'self-powered' on, EPS off;
+      (DR event)               widen the thermostat band.
+    load_management_capacity - whole-home load near the main-breaker limit. Battery
+      (over threshold)         untouched; shed non-essential circuits by lowering
+                               their max input current; thermostat at baseline.
+    capacity_management      - design_config-3 home islanded by the external
+      (Config #3 islanded)     capacity switch (grid offline): EPS backup on,
+                               Savings off; widen the band. The disconnect itself
+                               is external (out of scope); we only react to it.
+    resiliency               - grid outage / PSPS. EPS backup on (the panel sheds
+      (no grid / PSPS)         non-critical circuits by predefined priority),
+                               Savings off; hard-widen the thermostat.
 
 The battery mode maps to the same dispatch contract the dashboard 'Control &
 dispatch' panel-mode card uses (action_type='set_operating_mode',
@@ -169,16 +175,10 @@ def _thermostat_step(home_name, cfg, conn, scenario, strategy):
 
 def _battery_mode(scenario, policy, signals):
     """Resolve the panel battery mode (smartBackupMode + epsModeInfo) for the
-    scenario from the load_management policy.
-
-    load_peak_management carries two mappings: the default `battery_mode` for a
-    plain TOU peak-price period, and `dr_event_battery_mode` used when an actual
-    DR event is active (signals['dr_event']). Returns the chosen mode plus
-    human-readable labels and which mapping was used."""
-    use_dr = (scenario == "load_peak_management"
-              and bool(signals.get("dr_event"))
-              and policy.get("dr_event_battery_mode") is not None)
-    mode = dict(policy.get("dr_event_battery_mode" if use_dr else "battery_mode", {}))
+    scenario from the load_management policy. Each scenario now carries a single
+    `battery_mode` mapping (the old load_peak DR sub-case became its own
+    load_management_dr scenario). Returns the chosen mode plus readable labels."""
+    mode = dict(policy.get("battery_mode", {}))
     sbm = int(mode.get("smartBackupMode", 0))
     eps = bool(mode.get("epsModeInfo", False))
     return {
@@ -187,7 +187,7 @@ def _battery_mode(scenario, policy, signals):
         "epsModeInfo": eps,
         "eps_backup": "on" if eps else "off",
         "dr_event": bool(signals.get("dr_event")),
-        "policy_used": "dr_event_battery_mode" if use_dr else "battery_mode",
+        "policy_used": "battery_mode",
     }
 
 
@@ -230,7 +230,7 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
         total_load_w = round(sum(c["power_w"] for c in circuits), 1)
         soc_ok = soc is None or soc >= min_soc
 
-        sequence = _sequence(scenario, home_name, cfg, conn, strategy, bm, pdev)
+        sequence = _sequence(scenario, home_name, cfg, conn, strategy, bm, pdev, circuits)
 
         return {
             "controller": "ilc",
@@ -267,7 +267,34 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
             conn.close()
 
 
-def _sequence(scenario, home_name, cfg, conn, strategy, bm, panel_device_id):
+def _circuit_current_limit_step(order, cfg, circuits):
+    """Advisory step: shed non-essential circuits by lowering their max input
+    current (PD303 setAmp) so the panel trips them off. The agent only logs the
+    advisory; the actual per-circuit write is actuated by the dashboard's guarded
+    /control/dispatch path. Battery mode stays off for this scenario."""
+    lm = cfg["defaults"].get("load_management", {})
+    ccl = lm.get("circuit_current_limit", {})
+    floor_a = float(ccl.get("non_essential_max_input_a", 0))
+    targets = [
+        {"circuit_id": c["circuit_id"], "channel_num": c["channel_num"],
+         "circuit_name": c["circuit_name"], "power_w": c["power_w"],
+         "max_input_a": floor_a}
+        for c in circuits if c["circuit_priority"] == "non_essential"
+        and c["is_controllable"] and not c["is_critical"]
+    ]
+    shed_w = round(sum(t["power_w"] for t in targets), 1)
+    return {
+        "order": order,
+        "target": "circuit_current_limit",
+        "action": "limit_input_current",
+        "params": {"non_essential_max_input_a": floor_a, "circuits": targets},
+        "shadow": True,
+        "detail": (f"Shed {len(targets)} non-essential circuit(s) (~{shed_w}W) by "
+                   f"capping max input current at {floor_a}A."),
+    }
+
+
+def _sequence(scenario, home_name, cfg, conn, strategy, bm, panel_device_id, circuits):
     """Ordered, safe sequence of operations for the scenario.
 
     Order matters for the inverter: ease the HVAC BEFORE the panel transfers to
@@ -278,7 +305,10 @@ def _sequence(scenario, home_name, cfg, conn, strategy, bm, panel_device_id):
 
     detail = (f"Set panel battery mode: Savings '{bm['savings_mode']}', "
               f"EPS backup {bm['eps_backup']}.")
-    if bm["epsModeInfo"]:
+    if scenario == "capacity_management":
+        detail += (" Grid disconnect is performed by the external capacity switch "
+                   "(out of scope); the panel auto-islands and runs EPS-on.")
+    elif bm["epsModeInfo"]:
         detail += (" Under EPS backup the panel sheds non-critical circuits by "
                    "its predefined priority (shed is not directly controllable).")
     steps.append({
@@ -290,6 +320,10 @@ def _sequence(scenario, home_name, cfg, conn, strategy, bm, panel_device_id):
                    "epsModeInfo": bm["epsModeInfo"]},
         "detail": detail,
     })
+
+    # load_management_capacity sheds circuits instead of touching the battery.
+    if scenario == "load_management_capacity":
+        steps.append(_circuit_current_limit_step(len(steps) + 1, cfg, circuits))
     return steps
 
 
@@ -363,7 +397,8 @@ def main():
     ap = argparse.ArgumentParser(description="Build the full-home ILC operation sequence for a home.")
     ap.add_argument("--home", default="test_home")
     ap.add_argument("--scenario", default=None,
-                    choices=["normal", "load_peak_management", "capacity_management", "resiliency"],
+                    choices=["normal", "load_management_tou", "load_management_dr",
+                             "load_management_capacity", "capacity_management", "resiliency"],
                     help="Force a scenario (default: auto-detect from live signals).")
     ap.add_argument("--write", action="store_true",
                     help="Log the plan to control_advisories (default: print only).")
