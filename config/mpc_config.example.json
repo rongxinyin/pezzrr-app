@@ -70,8 +70,9 @@
     "load_management": {
       "_comment": "Full-home ILC scenario controller (smart_home_ilc.scenario_plan). The resolved operation_scenario (shared with the HVAC layer) selects a per-scenario EcoFlow Smart Home Panel battery mode below. Circuit shedding is NOT directly controllable via the EcoFlow API -- under 'EPS backup' (epsModeInfo=true) the panel sheds by its own predefined circuit priorities. Advisory/shadow only: logged to control_advisories (controller='ilc', action_type='set_operating_mode'); no device commands are sent.",
       "battery": {
-        "_comment": "EcoFlow Delta Pro Ultra. Reported for context (SOC health); the panel manages source/inverter internally under EPS backup.",
+        "_comment": "EcoFlow Delta Pro Ultra. Reported for context (SOC health); the panel manages source/inverter internally under EPS backup. max_output_w is the per-inverter output cap (7.2 kW); the Scenarios battery-capacity gauge multiplies it by the home's inverter count and warns when operating load reaches capacity_trigger_pct of that total.",
         "max_output_w": 7200,
+        "capacity_trigger_pct": 0.95,
         "min_soc_pct": 20,
         "reserve_soc_pct": 10
       },

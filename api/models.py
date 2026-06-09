@@ -287,6 +287,46 @@ class ScenarioDispatchResult(BaseModel):
     steps: list[ScenarioDispatchStep] = []
 
 
+class PanelCapacity(BaseModel):
+    """Panel breaker capacity vs. live operating load for the Scenarios page.
+    Mirrors the ILC capacity supervisor: amps = home_load_w / service_voltage,
+    threshold = capacity_trigger_pct * main breaker."""
+    home_id: int
+    breaker_a: float                 # main breaker rating (A)
+    service_voltage_v: float
+    trigger_pct: float               # capacity_trigger_pct (fraction)
+    capacity_kw: float               # breaker_a * service_voltage / 1000
+    threshold_a: float               # trigger_pct * breaker_a
+    threshold_kw: float
+    current_w: Optional[int] = None  # latest panel load
+    current_a: Optional[float] = None
+    current_kw: Optional[float] = None
+    load_pct: Optional[float] = None  # current_a / breaker_a (fraction)
+    near_threshold: bool = False      # current_a >= threshold_a
+    over_capacity: bool = False       # current_a >= breaker_a
+    ts: Optional[datetime] = None
+
+
+class BatteryCapacity(BaseModel):
+    """Battery inverter output capacity vs. live operating load for the
+    Scenarios page. Each Delta Pro Ultra inverter supplies up to
+    inverter_capacity_kw; total capacity scales with the home's inverter count."""
+    home_id: int
+    inverter_count: int
+    inverter_capacity_kw: float       # per inverter (e.g. 7.2)
+    total_capacity_kw: float          # inverter_count * inverter_capacity_kw
+    trigger_pct: float                # capacity_trigger_pct (fraction)
+    threshold_kw: float               # trigger_pct * total_capacity_kw
+    current_load_w: Optional[int] = None     # latest panel load
+    current_load_kw: Optional[float] = None
+    battery_power_w: Optional[int] = None     # battery output (discharge +)
+    battery_power_kw: Optional[float] = None
+    load_pct: Optional[float] = None  # current_load / total_capacity (fraction)
+    near_threshold: bool = False      # load >= threshold
+    over_capacity: bool = False       # load >= total inverter capacity
+    ts: Optional[datetime] = None
+
+
 # =====================================================================
 # Demand response (§13.4)
 # =====================================================================
