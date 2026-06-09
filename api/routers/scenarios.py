@@ -2,19 +2,22 @@
 Operation-scenario endpoints (Scenarios dashboard page).
 
 The smart-home ILC resolves one operation scenario per home each cycle
-(normal | load_peak_management | capacity_management | resiliency) and logs it
-to control_advisories. This router surfaces that current scenario, lets an
-operator pin a per-day scenario on a calendar (scenario_schedule), and
-dispatches a scenario's operation: the panel battery mode + the thermostat
-band-widen setpoints, reusing the guarded /control/dispatch path so RBAC,
-home-scope, circuit-safety and the VOLTTRON bus all behave identically.
+(normal | load_management_tou | load_management_dr | load_management_capacity |
+capacity_management | resiliency) and logs it to control_advisories. This router
+surfaces that current scenario, lets an operator pin a per-day scenario on a
+calendar (scenario_schedule), and dispatches a scenario's operation: the panel
+battery mode + the thermostat band-widen setpoints, reusing the guarded
+/control/dispatch path so RBAC, home-scope, circuit-safety and the VOLTTRON bus
+all behave identically.
 
 Dispatch resolution comes from mpc_config:
-  - battery mode  <- defaults.load_management.scenarios[scenario].battery_mode
-                     (dr_event_battery_mode when a DR event is active under
-                     load_peak_management),
+  - battery mode  <- defaults.load_management.scenarios[scenario].battery_mode,
   - setpoints     <- baseline_setpoints +/- defaults.scenarios[scenario] offsets
                      (cooling raised, heating lowered).
+
+Two legs are shadow-only (no EcoFlow API write yet) and are reported but not
+actuated: load_management_capacity's non-essential circuit current limit, and
+capacity_management's grid disconnect (performed by an external switch).
 """
 
 from __future__ import annotations
@@ -164,24 +167,17 @@ async def _dr_event_active() -> bool:
     return any(w0 <= now < w1 for w0, w1 in windows)
 
 
-def _battery_params(scenario: str, dr_active: bool) -> tuple[dict, bool]:
-    """(panel params, used_dr_mapping) for the scenario from mpc_config."""
+def _battery_params(scenario: str) -> dict:
+    """Panel battery params (smartBackupMode + epsModeInfo) for the scenario from
+    mpc_config. Each scenario carries a single battery_mode mapping."""
     cfg = control._mpc_config()
     scn = (((cfg.get("defaults") or {}).get("load_management") or {})
            .get("scenarios") or {}).get(scenario, {})
-    use_dr = (
-        scenario == "load_peak_management"
-        and dr_active
-        and scn.get("dr_event_battery_mode") is not None
-    )
-    mode = scn.get("dr_event_battery_mode" if use_dr else "battery_mode") or {}
-    return (
-        {
-            "smartBackupMode": int(mode.get("smartBackupMode", 0)),
-            "epsModeInfo": bool(mode.get("epsModeInfo", False)),
-        },
-        use_dr,
-    )
+    mode = scn.get("battery_mode") or {}
+    return {
+        "smartBackupMode": int(mode.get("smartBackupMode", 0)),
+        "epsModeInfo": bool(mode.get("epsModeInfo", False)),
+    }
 
 
 def _setpoint_params(home_name: str, scenario: str) -> dict:
@@ -223,7 +219,7 @@ async def dispatch_scenario(
     steps: list[ScenarioDispatchStep] = []
 
     # 1. Panel battery mode (Savings mode + EPS backup) for the scenario.
-    battery_params, _used_dr = _battery_params(req.operation_scenario, dr_active)
+    battery_params = _battery_params(req.operation_scenario)
     try:
         resp = await control.dispatch(
             DispatchRequest(
@@ -273,6 +269,20 @@ async def dispatch_scenario(
                 kind="thermostat", status="skipped",
                 detail=str(e.detail), params=setpoint_params,
             ))
+
+    # 3. Shadow-only legs the dashboard can't actuate (no EcoFlow API write).
+    if req.operation_scenario == "load_management_capacity":
+        steps.append(ScenarioDispatchStep(
+            kind="circuit_current_limit", status="shadow",
+            detail="Shed non-essential circuits by capping their max input "
+                   "current — shadow-only, not yet wired to the EcoFlow API.",
+        ))
+    elif req.operation_scenario == "capacity_management":
+        steps.append(ScenarioDispatchStep(
+            kind="grid_disconnect", status="external",
+            detail="Grid disconnect is performed by the external capacity switch "
+                   "(out of scope); the panel auto-islands and runs EPS-on.",
+        ))
 
     return ScenarioDispatchResult(
         home_id=req.home_id,

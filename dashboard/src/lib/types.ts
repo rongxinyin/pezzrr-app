@@ -205,7 +205,9 @@ export interface SetpointPlan {
 // =====================================================================
 export type OperationScenario =
   | 'normal'
-  | 'load_peak_management'
+  | 'load_management_tou'
+  | 'load_management_dr'
+  | 'load_management_capacity'
   | 'capacity_management'
   | 'resiliency'
 

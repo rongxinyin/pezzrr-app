@@ -236,7 +236,8 @@ class SetpointPlan(BaseModel):
 # Operation scenarios (Scenarios page — calendar + dispatch)
 # =====================================================================
 OPERATION_SCENARIOS = (
-    "normal", "load_peak_management", "capacity_management", "resiliency",
+    "normal", "load_management_tou", "load_management_dr",
+    "load_management_capacity", "capacity_management", "resiliency",
 )
 
 
@@ -272,9 +273,9 @@ class ScenarioDispatchRequest(BaseModel):
 
 
 class ScenarioDispatchStep(BaseModel):
-    kind: str                 # 'battery_mode' | 'thermostat'
+    kind: str                 # battery_mode | thermostat | circuit_current_limit | grid_disconnect
     action_id: Optional[int] = None
-    status: str               # pending | success | failed | skipped
+    status: str               # pending | success | failed | skipped | shadow | external
     detail: Optional[str] = None
     params: dict = {}
 
