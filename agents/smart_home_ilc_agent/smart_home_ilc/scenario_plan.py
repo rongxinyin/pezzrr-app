@@ -268,10 +268,10 @@ def build_plan(home_name, cfg=None, conn=None, now_utc=None, scenario_override=N
 
 
 def _circuit_current_limit_step(order, cfg, circuits):
-    """Shadow step: shed non-essential circuits (is_critical = false) by lowering
-    their max input current so the panel trips them off. The per-circuit current
-    write is not yet wired to the EcoFlow API, so this only reports the intended
-    targets; battery mode stays off for this scenario."""
+    """Advisory step: shed non-essential circuits by lowering their max input
+    current (PD303 setAmp) so the panel trips them off. The agent only logs the
+    advisory; the actual per-circuit write is actuated by the dashboard's guarded
+    /control/dispatch path. Battery mode stays off for this scenario."""
     lm = cfg["defaults"].get("load_management", {})
     ccl = lm.get("circuit_current_limit", {})
     floor_a = float(ccl.get("non_essential_max_input_a", 0))
@@ -279,7 +279,8 @@ def _circuit_current_limit_step(order, cfg, circuits):
         {"circuit_id": c["circuit_id"], "channel_num": c["channel_num"],
          "circuit_name": c["circuit_name"], "power_w": c["power_w"],
          "max_input_a": floor_a}
-        for c in circuits if not c["is_critical"]
+        for c in circuits if c["circuit_priority"] == "non_essential"
+        and c["is_controllable"] and not c["is_critical"]
     ]
     shed_w = round(sum(t["power_w"] for t in targets), 1)
     return {
@@ -289,8 +290,7 @@ def _circuit_current_limit_step(order, cfg, circuits):
         "params": {"non_essential_max_input_a": floor_a, "circuits": targets},
         "shadow": True,
         "detail": (f"Shed {len(targets)} non-essential circuit(s) (~{shed_w}W) by "
-                   f"capping max input current at {floor_a}A. Shadow-only: not yet "
-                   f"wired to the EcoFlow API."),
+                   f"capping max input current at {floor_a}A."),
     }
 
 

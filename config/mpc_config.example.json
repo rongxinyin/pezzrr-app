@@ -76,7 +76,7 @@
         "reserve_soc_pct": 10
       },
       "circuit_current_limit": {
-        "_comment": "load_management_capacity shed: lower the max input current on non-essential circuits (panel_circuits.is_critical = false) to non_essential_max_input_a so the panel trips them off, shaving load below the breaker limit. Shadow-only: the per-circuit current write is not yet wired to the EcoFlow API, so this is logged to control_advisories as the intended action.",
+        "_comment": "load_management_capacity shed: lower the max input current on non-essential circuits (circuit_priority = 'non_essential') to non_essential_max_input_a (PD303 setAmp) so the panel trips them off, shaving load below the breaker limit. Actuated per-circuit through the dashboard /control/dispatch path; the ILC agent logs the same targets to control_advisories.",
         "non_essential_max_input_a": 0
       },
       "scenarios": {

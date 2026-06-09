@@ -15,9 +15,11 @@ Dispatch resolution comes from mpc_config:
   - setpoints     <- baseline_setpoints +/- defaults.scenarios[scenario] offsets
                      (cooling raised, heating lowered).
 
-Two legs are shadow-only (no EcoFlow API write yet) and are reported but not
-actuated: load_management_capacity's non-essential circuit current limit, and
-capacity_management's grid disconnect (performed by an external switch).
+load_management_capacity additionally sheds each non-essential circuit by capping
+its max input current (PD303 setAmp) via the same guarded dispatch path; normal
+restores those circuits to their breaker rating (or the panel master breaker when
+unrated). Only capacity_management's grid disconnect stays out of band — it is
+performed by an external switch, so that leg is reported but not actuated here.
 """
 
 from __future__ import annotations
@@ -180,6 +182,32 @@ def _battery_params(scenario: str) -> dict:
     }
 
 
+def _circuit_limit_amp() -> int:
+    """Max input current (A) non-essential circuits are capped to when shedding,
+    from mpc_config defaults.load_management.circuit_current_limit (default 0 =
+    fully off)."""
+    cfg = control._mpc_config()
+    ccl = (((cfg.get("defaults") or {}).get("load_management") or {})
+           .get("circuit_current_limit") or {})
+    return int(ccl.get("non_essential_max_input_a", 0))
+
+
+def _panel_main_breaker_amp() -> int:
+    """Panel master breaker amperage from mpc_config defaults.panel (default 60),
+    used as the restore target for circuits with no rated_amps on record."""
+    cfg = control._mpc_config()
+    panel = ((cfg.get("defaults") or {}).get("panel") or {})
+    return int(panel.get("main_breaker_a", 60))
+
+
+def _circuit_restore_amp(rated_amps) -> int:
+    """Max input current (A) to restore a non-essential circuit to when the home
+    returns to normal: its breaker rating if known, else the panel master
+    breaker. Clamped to the 0-60 A setAmp range the panel accepts."""
+    amp = int(rated_amps) if rated_amps is not None else _panel_main_breaker_amp()
+    return max(0, min(amp, 60))
+
+
 def _setpoint_params(home_name: str, scenario: str) -> dict:
     """Thermostat setpoint params (deg C) = baseline +/- the scenario offsets.
     Cooling is raised and heating lowered to widen the deadband; the home's
@@ -270,13 +298,93 @@ async def dispatch_scenario(
                 detail=str(e.detail), params=setpoint_params,
             ))
 
-    # 3. Shadow-only legs the dashboard can't actuate (no EcoFlow API write).
+    # 3a. load_management_capacity sheds non-essential circuits by capping each
+    #     one's max input current so the panel trips it off. One guarded
+    #     /control/dispatch curtail per circuit, so RBAC/home-scope/circuit-safety
+    #     all apply and each circuit gets its own control_actions row.
     if req.operation_scenario == "load_management_capacity":
-        steps.append(ScenarioDispatchStep(
-            kind="circuit_current_limit", status="shadow",
-            detail="Shed non-essential circuits by capping their max input "
-                   "current — shadow-only, not yet wired to the EcoFlow API.",
-        ))
+        floor_a = _circuit_limit_amp()
+        circuits = await db.fetch(
+            """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name
+               FROM panel_circuits pc
+               JOIN devices d ON d.device_id = pc.device_id
+               WHERE d.home_id = $1
+                 AND pc.circuit_priority = 'non_essential'
+                 AND pc.is_controllable = TRUE AND pc.is_critical = FALSE
+               ORDER BY pc.channel_num""",
+            req.home_id,
+        )
+        if not circuits:
+            steps.append(ScenarioDispatchStep(
+                kind="circuit_current_limit", status="skipped",
+                detail="No non-essential controllable circuits to shed for this home.",
+            ))
+        for c in circuits:
+            cparams = {"max_input_a": floor_a}
+            label = c["circuit_name"] or f"Circuit {c['channel_num']}"
+            try:
+                resp = await control.dispatch(
+                    DispatchRequest(
+                        home_id=req.home_id,
+                        action_type="curtail",
+                        target=DispatchTarget(kind="circuit", circuit_id=c["circuit_id"]),
+                        params=cparams,
+                    ),
+                    user,
+                )
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", action_id=resp.action_id,
+                    status=resp.status, params=cparams,
+                    detail=f"{label}: cap max input current at {floor_a}A.",
+                ))
+            except HTTPException as e:
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", status="skipped",
+                    detail=f"{label}: {e.detail}", params=cparams,
+                ))
+    # 3b. normal restores each non-essential circuit's max input current to its
+    #     breaker rating (or the panel master breaker when unrated), undoing a
+    #     prior load_management_capacity shed. Same guarded per-circuit dispatch.
+    elif req.operation_scenario == "normal":
+        circuits = await db.fetch(
+            """SELECT pc.circuit_id, pc.channel_num, pc.circuit_name, pc.rated_amps
+               FROM panel_circuits pc
+               JOIN devices d ON d.device_id = pc.device_id
+               WHERE d.home_id = $1
+                 AND pc.circuit_priority = 'non_essential'
+                 AND pc.is_controllable = TRUE AND pc.is_critical = FALSE
+               ORDER BY pc.channel_num""",
+            req.home_id,
+        )
+        if not circuits:
+            steps.append(ScenarioDispatchStep(
+                kind="circuit_current_limit", status="skipped",
+                detail="No non-essential controllable circuits to restore for this home.",
+            ))
+        for c in circuits:
+            restore_a = _circuit_restore_amp(c["rated_amps"])
+            cparams = {"max_input_a": restore_a}
+            label = c["circuit_name"] or f"Circuit {c['channel_num']}"
+            try:
+                resp = await control.dispatch(
+                    DispatchRequest(
+                        home_id=req.home_id,
+                        action_type="release",
+                        target=DispatchTarget(kind="circuit", circuit_id=c["circuit_id"]),
+                        params=cparams,
+                    ),
+                    user,
+                )
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", action_id=resp.action_id,
+                    status=resp.status, params=cparams,
+                    detail=f"{label}: restore max input current to {restore_a}A.",
+                ))
+            except HTTPException as e:
+                steps.append(ScenarioDispatchStep(
+                    kind="circuit_current_limit", status="skipped",
+                    detail=f"{label}: {e.detail}", params=cparams,
+                ))
     elif req.operation_scenario == "capacity_management":
         steps.append(ScenarioDispatchStep(
             kind="grid_disconnect", status="external",

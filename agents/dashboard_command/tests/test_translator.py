@@ -70,6 +70,21 @@ def test_circuit_release_flips_channel_on():
     assert rpc.calls[0][2][2] == {"channel": 9, "enabled": True}
 
 
+def test_circuit_max_input_a_calls_set_circuit_amp():
+    rpc = FakeRpc()
+    res = _translator(rpc).handle({
+        "action_id": 112,
+        "action_type": "curtail",
+        "target": {"kind": "circuit", "circuit_id": 37},
+        "params": {"max_input_a": 10},
+    })
+    assert res["success"] is True
+    identity, method, args = rpc.calls[0]
+    assert identity == "ecoflow_agent"
+    assert method == "set_circuit_amp_rpc"
+    assert args == ("SN-1", 9, 10)
+
+
 def test_circuit_unmapped_fails_gracefully():
     rpc = FakeRpc()
     res = _translator(rpc).handle({
