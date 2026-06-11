@@ -24,10 +24,20 @@ function gridState(g: number | null): { label: string; status: Status } {
   return { label: 'Grid ?', status: 'info' }
 }
 
+// The panel is in exactly one operating mode: islanded on battery (EPS) during
+// a grid outage, or grid-tied savings otherwise — never both. eps_mode_active
+// (derived from powerSta) picks which one is live.
+function operatingMode(eps: boolean | null): { label: string; color: string } {
+  if (eps === true) return { label: 'EPS mode active', color: 'var(--act)' }
+  if (eps === false) return { label: 'Saving mode active', color: 'var(--ok)' }
+  return { label: 'Mode —', color: 'var(--text-faint)' }
+}
+
 // §13.1 home card: name, status dot, SoC ring, current load, grid/DR badge.
 export function HomeCard({ home }: { home: FleetStatusItem }) {
   const dot = STATUS_COLORS[home.status].fg
   const grid = gridState(home.grid_status)
+  const mode = operatingMode(home.eps_mode_active)
   return (
     <Link to={`/homes/${home.home_id}`} className="block">
       <div
@@ -61,20 +71,15 @@ export function HomeCard({ home }: { home: FleetStatusItem }) {
           </div>
         </div>
 
-        {/* Panel status: grid (on-grid / outage) + EPS backup ("saving") mode. */}
+        {/* Panel status: grid (on-grid / outage) + the single live operating
+            mode — EPS backup during an outage, else grid-tied savings. */}
         <div
           className="mt-3 flex items-center justify-between pt-3"
           style={{ borderTop: '0.5px solid var(--border)' }}
         >
           <Badge status={grid.status}>{grid.label}</Badge>
-          <span className="text-[12px] text-text-muted">
-            Saving mode{' '}
-            <span
-              className="font-medium"
-              style={{ color: home.eps_mode_active ? 'var(--ok)' : 'var(--text-faint)' }}
-            >
-              {home.eps_mode_active == null ? '—' : home.eps_mode_active ? 'active' : 'off'}
-            </span>
+          <span className="text-[12px] font-medium" style={{ color: mode.color }}>
+            {mode.label}
           </span>
         </div>
       </div>

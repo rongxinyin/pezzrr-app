@@ -55,7 +55,7 @@ class PanelSnapshot(BaseModel):
     solar_power_w: Optional[float] = None
     battery_power_w: Optional[float] = None
     battery_soc_pct: Optional[float] = None
-    grid_status: Optional[str] = None
+    grid_status: Optional[int] = None  # SHP2 gridSta: 0 = outage/off-grid, 1 = on-grid
     eps_mode_active: Optional[bool] = None
 
 
