@@ -50,11 +50,13 @@ def transform_panel_reading(data, device_id, home_id):
         "pd303_mc.masterIncreInfo.gridSta",
         data.get("masterIncreInfo.gridSta"),
     )
-    # EPS (backup/"saving") mode is a direct boolean at pd303_mc.epsModeInfo,
-    # not nested under .eps.
-    eps_mode = data.get("pd303_mc.epsModeInfo", data.get("epsModeInfo"))
-    if eps_mode is not None:
-        eps_mode = bool(eps_mode)
+    # EPS/backup is "active" when the panel is islanded and powering loads from
+    # energy storage (battery) instead of the grid. pd303_mc.epsModeInfo is only
+    # the static enable toggle — it stays False even during a real outage — so
+    # derive the live state from powerSta: LOAD_CH_ES_POWER (energy storage) vs
+    # LOAD_CH_EG_POWER (electric grid).
+    power_sta = data.get("pd303_mc.powerSta", data.get("powerSta"))
+    eps_mode = None if power_sta is None else (power_sta == "LOAD_CH_ES_POWER")
 
     return {
         "device_id": device_id,
