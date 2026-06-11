@@ -44,8 +44,15 @@ def transform_panel_reading(data, device_id, home_id):
     # Negate so positive = charging, negative = discharging (panel convention)
     battery_power = -battery_power if battery_power else None
 
-    grid_status = data.get("pd303_mc.gridSta")
-    eps_mode = data.get("pd303_mc.epsModeInfo.eps")
+    # Grid connection state lives under masterIncreInfo (0 = off-grid/outage,
+    # 1 = on-grid); the bare pd303_mc.gridSta key the SHP2 API never returns.
+    grid_status = data.get(
+        "pd303_mc.masterIncreInfo.gridSta",
+        data.get("masterIncreInfo.gridSta"),
+    )
+    # EPS (backup/"saving") mode is a direct boolean at pd303_mc.epsModeInfo,
+    # not nested under .eps.
+    eps_mode = data.get("pd303_mc.epsModeInfo", data.get("epsModeInfo"))
     if eps_mode is not None:
         eps_mode = bool(eps_mode)
 

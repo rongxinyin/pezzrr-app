@@ -430,5 +430,7 @@ export interface FleetStatusItem {
   grid_power_w: number | null
   solar_power_w: number | null
   battery_soc_pct: number | null
+  grid_status: number | null // 0 = outage/off-grid, 1 = on-grid, null = unknown
+  eps_mode_active: boolean | null // EPS backup (saving) mode engaged
   panel_ts: string | null
 }

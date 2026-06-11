@@ -91,6 +91,8 @@ class FleetStatusItem(BaseModel):
     grid_power_w: Optional[float] = None
     solar_power_w: Optional[float] = None
     battery_soc_pct: Optional[float] = None
+    grid_status: Optional[int] = None  # SHP2 gridSta: 0 = outage/off-grid, 1 = on-grid
+    eps_mode_active: Optional[bool] = None  # EPS backup (saving) mode engaged
     panel_ts: Optional[datetime] = None
 
 

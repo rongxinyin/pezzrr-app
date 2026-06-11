@@ -202,6 +202,8 @@ async def fleet_status(user: User = Depends(get_current_user)):
             grid_power_w=_round_w(r["grid_power_w"]),
             solar_power_w=_round_w(r["solar_power_w"]),
             battery_soc_pct=_round1(soc),
+            grid_status=r["grid_status"],
+            eps_mode_active=r["eps_mode_active"],
             panel_ts=r["panel_ts"],
         ))
     return out
