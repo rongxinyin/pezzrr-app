@@ -5,6 +5,7 @@ and seed/upsert helpers.
 """
 
 import logging
+import time
 import psycopg2
 import psycopg2.extras
 
@@ -21,12 +22,23 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     # Connection management
     # ------------------------------------------------------------------
-    def connect(self):
+    def connect(self, retries=30, retry_delay=2.0):
         if self._conn is None or self._conn.closed:
-            log.info("Connecting to database ...")
-            self._conn = psycopg2.connect(self._dsn)
-            self._conn.autocommit = True
-            log.info("Database connected.")
+            last_err = None
+            for attempt in range(1, retries + 1):
+                try:
+                    log.info("Connecting to database ...")
+                    self._conn = psycopg2.connect(self._dsn)
+                    self._conn.autocommit = True
+                    log.info("Database connected.")
+                    return self._conn
+                except psycopg2.OperationalError as e:
+                    last_err = e
+                    log.warning("Database not ready (attempt %d/%d): %s",
+                                attempt, retries, str(e).strip())
+                    if attempt < retries:
+                        time.sleep(retry_delay)
+            raise last_err
         return self._conn
 
     def _cursor(self):
