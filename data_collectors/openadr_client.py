@@ -143,6 +143,104 @@ class OpenADRClient:
         now = datetime.now(timezone.utc)
         return self._active_price(events, now)
 
+    # ── Full-day curve ─────────────────────────────────────────────────────────
+
+    def day_curve(self, now: datetime | None = None,
+                  tz_name: str = "America/Los_Angeles") -> list[dict]:
+        """Effective price segments covering the local day that contains `now`.
+
+        Fetches the program's events and steps at every interval boundary inside
+        the day, emitting one segment per boundary span with the winning price
+        (peak overrides off-peak). With hourly intervals on the VTN this yields
+        the full 24-hour profile for the current day.
+        """
+        from zoneinfo import ZoneInfo
+
+        self._ensure_token()
+        resp = requests.get(
+            f"{self._vtn}/events",
+            params={"programID": self.program_id},
+            headers=self._headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+
+        if now is None:
+            now = datetime.now(timezone.utc)
+        local = ZoneInfo(tz_name)
+        d = now.astimezone(local).date()
+        day_start = datetime(d.year, d.month, d.day, tzinfo=local).astimezone(timezone.utc)
+        day_end = day_start + timedelta(days=1)
+
+        ivs = []
+        for event in events:
+            priority = event.get("priority")
+            for interval in (event.get("intervals") or []):
+                period = interval.get("intervalPeriod") or {}
+                start_str = period.get("start")
+                dur_str = period.get("duration")
+                if not start_str or not dur_str:
+                    continue
+                start = datetime.fromisoformat(start_str).astimezone(timezone.utc)
+                end = start + _parse_iso_duration(dur_str)
+                if end <= day_start or start >= day_end:
+                    continue
+                price = None
+                for payload in interval.get("payloads", []):
+                    if payload.get("type") == "PRICE":
+                        price = payload["values"][0]
+                        break
+                if price is None:
+                    continue
+                ivs.append({
+                    "start": start, "end": end, "price": price,
+                    "priority": priority,
+                    "period_type": "peak" if priority == 1 else "off_peak",
+                    "event_name": event.get("eventName", ""),
+                    "event_id": event.get("id", ""),
+                })
+        if not ivs:
+            return []
+
+        bounds = {day_start, day_end}
+        for r in ivs:
+            if day_start < r["start"] < day_end:
+                bounds.add(r["start"])
+            if day_start < r["end"] < day_end:
+                bounds.add(r["end"])
+        ordered = sorted(bounds)
+
+        def winner_at(t: datetime):
+            covering = [r for r in ivs if r["start"] <= t < r["end"]]
+            if not covering:
+                return None
+            return min(covering, key=lambda r: (
+                0 if r["period_type"] == "peak" else 1,
+                r["priority"] if r["priority"] is not None else 99,
+            ))
+
+        segments = []
+        for i in range(len(ordered) - 1):
+            t0, t1 = ordered[i], ordered[i + 1]
+            w = winner_at(t0)
+            if w is None:
+                continue
+            segments.append({
+                "interval_start": t0,
+                "interval_end": t1,
+                "price_per_kwh": w["price"],
+                "period_type": w["period_type"],
+                "priority": w["priority"],
+                "event_name": w["event_name"],
+                "event_id": w["event_id"],
+                "program_name": self._program_name,
+                "program_id": self.program_id,
+                "ven_id": self.ven_id,
+                "ven_name": self.ven_name,
+            })
+        return segments
+
     # ── Price resolution ──────────────────────────────────────────────────────
 
     def _active_price(self, events: list, now: datetime) -> dict | None:

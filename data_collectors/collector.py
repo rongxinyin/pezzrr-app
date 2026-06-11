@@ -325,34 +325,42 @@ class DataCollector:
         log.info("OpenADR loop ready: VEN=%s  program=%s  interval=%ds",
                  client.ven_name, cfg["program_name"], poll_interval)
 
+        last_sig = None
         while not self._stop_event.is_set():
             try:
-                result = client.poll()
-                if result is None:
-                    log.warning("OpenADR: no active price interval at current time.")
+                now_utc = datetime.now(timezone.utc)
+                curve = client.day_curve(now_utc)
+                if not curve:
+                    log.warning("OpenADR: no price intervals for the current day.")
                 else:
-                    row = {
-                        "ts":             result["polled_at"],
-                        "program_name":   result["program_name"],
-                        "program_id":     result["program_id"],
-                        "event_name":     result["event_name"],
-                        "event_id":       result["event_id"],
-                        "priority":       result["priority"],
-                        "period_type":    result["period_type"],
-                        "price_per_kwh":  result["price_per_kwh"],
-                        "interval_start": result["interval_start"],
-                        "interval_end":   result["interval_end"],
-                        "ven_id":         result["ven_id"],
-                        "ven_name":       result["ven_name"],
-                    }
-                    db.insert_openadr_event(row)
-                    log.info(
-                        "OpenADR [%s]: $%.5f/kWh  [%s]  event=%s",
-                        result["program_name"],
-                        result["price_per_kwh"],
-                        result["period_type"],
-                        result["event_name"],
-                    )
+                    sig = tuple((s["interval_start"], s["interval_end"],
+                                 s["price_per_kwh"], s["period_type"]) for s in curve)
+                    if sig != last_sig:
+                        for s in curve:
+                            db.insert_openadr_event({
+                                "ts":             now_utc,
+                                "program_name":   s["program_name"],
+                                "program_id":     s["program_id"],
+                                "event_name":     s["event_name"],
+                                "event_id":       s["event_id"],
+                                "priority":       s["priority"],
+                                "period_type":    s["period_type"],
+                                "price_per_kwh":  s["price_per_kwh"],
+                                "interval_start": s["interval_start"],
+                                "interval_end":   s["interval_end"],
+                                "ven_id":         s["ven_id"],
+                                "ven_name":       s["ven_name"],
+                            })
+                        last_sig = sig
+                        log.info("OpenADR: wrote %d-segment day curve for current day", len(curve))
+                    active = next((s for s in curve
+                                   if s["interval_start"] <= now_utc < s["interval_end"]), None)
+                    if active:
+                        log.info(
+                            "OpenADR [%s]: $%.5f/kWh  [%s]  event=%s",
+                            active["program_name"], active["price_per_kwh"],
+                            active["period_type"], active["event_name"],
+                        )
             except Exception:
                 log.error("OpenADR poll error:\n%s", traceback.format_exc())
 
